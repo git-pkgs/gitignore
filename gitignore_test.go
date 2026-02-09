@@ -1481,6 +1481,402 @@ func TestMatchEdgeCasesVsGitCheckIgnore(t *testing.T) {
 	}
 }
 
+// Tests below are adapted from git/t/t3070-wildmatch.sh
+// https://github.com/git/git/blob/8d8387116ae8c3e73f6184471f0c46edbd2c7601/t/t3070-wildmatch.sh
+//
+// The wildmatch test format is: match <wildmatch_result> <pathmatch_result> <text> <pattern>
+// We use the first column (wildmatch mode) since gitignore uses wildmatch semantics.
+// Cases marked 'x' in the original are implementation-defined; we include them where
+// our behavior is well-defined.
+//
+// Some wildmatch tests don't map directly to gitignore because gitignore adds
+// directory-content matching (a pattern matching "foo" also matches "foo/anything")
+// and unanchored patterns match at any directory level. Tests are adapted accordingly.
+
+func TestWildmatchBasicGlob(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		// Exact and simple wildcard matching
+		{"foo", "foo", true},
+		{"foo", "bar", false},
+		{"???", "foo", true},
+		{"??", "foo", false},
+		{"*", "foo", true},
+		{"f*", "foo", true},
+		{"*f", "foo", false},
+		{"*foo*", "foo", true},
+		{"*ob*a*r*", "foobar", true},
+		{"*ab", "aaaaaaabababab", true},
+
+		// Escaped special characters
+		{"foo\\*", "foo*", true},
+		{"foo\\*bar", "foobar", false},
+		{"f\\\\oo", "f\\oo", true},
+
+		// Bracket with glob operators
+		{"*[al]?", "ball", true},
+		{"[ten]", "ten", false}, // [ten] matches single char t, e, or n
+		{"t[a-g]n", "ten", true},
+		{"t[!a-g]n", "ten", false},
+		{"t[!a-g]n", "ton", true},
+		{"t[^a-g]n", "ton", true},
+
+		// Question mark and escape combinations
+		{"\\??\\?b", "?a?b", true},
+		{"\\a\\b\\c", "abc", true},
+
+		// Literal bracket via escape
+		{"\\[ab]", "[ab]", true},
+		{"[[]ab]", "[ab]", true},
+
+		// Range edge cases from wildmatch suite
+		{"a[c-c]st", "acrt", false},
+		{"a[c-c]rt", "acrt", true},
+
+		// Simple patterns
+		{"foo", "foo", true},
+		{"@foo", "@foo", true},
+		{"@foo", "foo", false},
+	}
+
+	for _, tt := range tests {
+		m := setupMatcher(t, tt.pattern+"\n")
+		got := m.Match(tt.path)
+		if got != tt.want {
+			t.Errorf("pattern %q, Match(%q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestWildmatchBracketEdgeCases(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		// ] as first char in bracket (literal member)
+		{"a[]]b", "a]b", true},
+		{"a[]-]b", "a-b", true},
+		{"a[]-]b", "a]b", true},
+		{"a[]-]b", "aab", false},
+		{"a[]a-]b", "aab", true},
+		{"]", "]", true},
+
+		// Negation with ] edge case
+		{"[!]-]", "]", false},
+
+		// Backslash-dash-caret range
+		{"[\\-^]", "]", true},
+		{"[\\-^]", "[", false},
+
+		// Various dash/range positions
+		{"[-]", "-", true},
+		{"[,-.]", "-", true},
+		{"[,-.]", "+", false},
+		{"[,-.]", "-.]", false},
+
+		// Comma in bracket
+		{"[,]", ",", true},
+		{"[\\,]", ",", true},
+		{"[\\,]", "\\", true},
+
+		// Caret as literal in bracket (not at start)
+		{"[a^bc]", "^", true},
+
+		// Space range
+		{"[ --]", " ", true},
+		{"[ --]", "$", true},
+		{"[ --]", "-", true},
+		{"[ --]", "0", false},
+
+		// Multiple dashes
+		{"[---]", "-", true},
+		{"[------]", "-", true},
+
+		// Dash in middle of range expression
+		{"[a-e-n]", "-", true},
+		{"[a-e-n]", "j", false},
+
+		// Negated multiple dashes
+		{"[!------]", "a", true},
+	}
+
+	for _, tt := range tests {
+		m := setupMatcher(t, tt.pattern+"\n")
+		got := m.Match(tt.path)
+		if got != tt.want {
+			t.Errorf("pattern %q, Match(%q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestWildmatchCharacterClassesExpanded(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		// [:lower:] and [:upper:]
+		{"[[:lower:]]", "a", true},
+		{"[[:lower:]]", "A", false},
+		{"[[:upper:]]", "A", true},
+		{"[[:upper:]]", "a", false},
+
+		// [:alnum:]
+		{"[[:alnum:]]", "a", true},
+		{"[[:alnum:]]", "5", true},
+		{"[[:alnum:]]", ".", false},
+
+		// [:blank:] (space and tab)
+		{"[[:blank:]]", " ", true},
+		{"[[:blank:]]", "\t", true},
+
+		// [:graph:] and [:print:]
+		{"[[:graph:]]", "a", true},
+		{"[[:graph:]]", "!", true},
+
+		// Underscore matches many classes
+		{"[[:alnum:][:alpha:][:blank:][:cntrl:][:digit:][:graph:][:lower:][:print:][:punct:][:space:][:upper:][:xdigit:]]", "_", true},
+
+		// Negated combination: period is not alnum/alpha/blank/cntrl/digit/lower/space/upper/xdigit
+		{"[^[:alnum:][:alpha:][:blank:][:cntrl:][:digit:][:lower:][:space:][:upper:][:xdigit:]]", ".", true},
+
+		// Invalid POSIX class name causes regex compilation failure (no match)
+		{"[[:digit:][:upper:][:spaci:]]", "1", false},
+
+		// Case-sensitive ranges
+		{"[A-Z]", "A", true},
+		{"[A-Z]", "a", false},
+		{"[a-z]", "a", true},
+		{"[a-z]", "A", false},
+		{"[B-Za]", "a", true},
+		{"[B-Za]", "A", false},
+		{"[B-a]", "a", true},
+		{"[B-a]", "A", false},
+		{"[Z-y]", "Z", true},
+		{"[Z-y]", "z", false},
+	}
+
+	for _, tt := range tests {
+		m := setupMatcher(t, tt.pattern+"\n")
+		got := m.Match(tt.path)
+		if got != tt.want {
+			t.Errorf("pattern %q, Match(%q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestWildmatchSlashHandling(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		// * does not cross slashes
+		{"foo*bar", "foo/baz/bar", false},
+		{"foo**bar", "foo/baz/bar", false},
+		// But ** in a/**/ position does
+		{"foo/**/bar", "foo/baz/bar", true},
+		{"foo/**/bar", "foo/b/a/z/bar", true},
+		{"foo/**/bar", "foo/bar", true},
+
+		// **/X matches X at any depth
+		{"**/foo", "foo", true},
+		{"**/foo", "XXX/foo", true},
+		{"**/foo", "bar/baz/foo", true},
+
+		// */foo is anchored (has slash), * matches one segment
+		{"*/foo", "bar/baz/foo", false},
+		{"*/foo", "bar/foo", true},
+
+		// **/bar/* matches content inside bar/
+		{"**/bar/*", "deep/foo/bar/baz", true},
+		{"**/bar/*", "deep/foo/bar", false},
+
+		// **/bar/** matches anything under bar/
+		{"**/bar/**", "deep/foo/bar/baz", true},
+
+		// ?  does not match /
+		{"foo?bar", "foo/bar", false},
+		{"foo?bar", "fooXbar", true},
+
+		// f[^eiu][^eiu][^eiu][^eiu][^eiu]r with slashes
+		{"f[^eiu][^eiu][^eiu][^eiu][^eiu]r", "foo-bar", true},
+
+		// Multi-segment ** patterns
+		{"**/t[o]", "foo/bar/baz/to", true},
+
+		// Complex multi-segment patterns
+		{"XXX/*/*/*/*/*/*/12/*/*/*/m/*/*/*", "XXX/adobe/courier/bold/o/normal//12/120/75/75/m/70/iso8859/1", true},
+		{"XXX/*/*/*/*/*/*/12/*/*/*/m/*/*/*", "XXX/adobe/courier/bold/o/normal//12/120/75/75/X/70/iso8859/1", false},
+
+		// * matches within segments only
+		{"*/*/*", "foo/bba/arr", true},
+		{"*/*/*", "foo/bar", false},
+		{"*/*/*", "foo", false},
+
+		// ** across multiple levels
+		{"**/**/**", "foo/bb/aa/rr", true},
+		{"**/**/**", "foo/bba/arr", true},
+
+		// Complex wildcard + slash patterns
+		{"*X*i", "abcXdefXghi", true},
+		{"*/*X*/*/*i", "ab/cXd/efXg/hi", true},
+		{"**/*X*/**/*i", "ab/cXd/efXg/hi", true},
+
+		// Long pattern from recursion/abort tests
+		{"-*-*-*-*-*-*-12-*-*-*-m-*-*-*", "-adobe-courier-bold-o-normal--12-120-75-75-m-70-iso8859-1", true},
+		{"-*-*-*-*-*-*-12-*-*-*-m-*-*-*", "-adobe-courier-bold-o-normal--12-120-75-75-X-70-iso8859-1", false},
+
+		// ** with extension
+		{"**/*a*b*g*n*t", "abcd/abcdefg/abcdefghijk/abcdefghijklmnop.txt", true},
+		{"**/*a*b*g*n*t", "abcd/abcdefg/abcdefghijk/abcdefghijklmnop.txtz", false},
+	}
+
+	for _, tt := range tests {
+		m := setupMatcher(t, tt.pattern+"\n")
+		got := m.Match(tt.path)
+		if got != tt.want {
+			t.Errorf("pattern %q, Match(%q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestWildmatchVsGitCheckIgnore(t *testing.T) {
+	type checkPath struct {
+		path  string
+		isDir bool
+	}
+
+	tests := []struct {
+		name     string
+		patterns string
+		paths    []checkPath
+	}{
+		{
+			name:     "star does not cross slashes",
+			patterns: "foo*bar\n",
+			paths: []checkPath{
+				{"fooXbar", false},
+				{"fooXXbar", false},
+			},
+		},
+		{
+			name:     "double star slash patterns",
+			patterns: "**/foo\n*/bar\n",
+			paths: []checkPath{
+				{"foo", false},
+				{"XXX/foo", false},
+				{"bar/baz/foo", false},
+				{"x/bar", false},
+			},
+		},
+		{
+			name:     "bracket ranges and negation",
+			patterns: "t[a-g]n\nt[!a-g]n\n",
+			paths: []checkPath{
+				{"ten", false},
+				{"ton", false},
+				{"tin", false},
+			},
+		},
+		{
+			name:     "complex glob operators",
+			patterns: "*[al]?\n[ten]\n",
+			paths: []checkPath{
+				{"ball", false},
+				{"tall", false},
+				{"t", false},
+				{"e", false},
+				{"n", false},
+				{"ten", false},
+			},
+		},
+		{
+			name:     "POSIX character classes",
+			patterns: "[[:alpha:]][[:digit:]][[:upper:]]\n[[:lower:]]\n[[:xdigit:]]\n",
+			paths: []checkPath{
+				{"a1B", false},
+				{"a", false},
+				{"f", false},
+				{"5", false},
+				{"D", false},
+			},
+		},
+		{
+			name:     "question mark does not match slash",
+			patterns: "foo?bar\n",
+			paths: []checkPath{
+				{"fooXbar", false},
+				{"fooybar", false},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+
+			for _, args := range [][]string{
+				{"git", "init", "--initial-branch=main"},
+				{"git", "config", "user.email", "test@test.com"},
+				{"git", "config", "user.name", "Test"},
+				{"git", "config", "commit.gpgsign", "false"},
+			} {
+				cmd := exec.Command(args[0], args[1:]...)
+				cmd.Dir = root
+				if err := cmd.Run(); err != nil {
+					t.Fatalf("git init: %v", err)
+				}
+			}
+
+			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(tt.patterns), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, cp := range tt.paths {
+				full := filepath.Join(root, cp.path)
+				if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if cp.isDir {
+					if err := os.MkdirAll(full, 0755); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.WriteFile(full, []byte("x"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			m := gitignore.New(root)
+
+			for _, cp := range tt.paths {
+				matchPath := cp.path
+				if cp.isDir {
+					matchPath += "/"
+				}
+
+				ourResult := m.Match(matchPath)
+
+				cmd := exec.Command("git", "check-ignore", "-q", cp.path)
+				cmd.Dir = root
+				err := cmd.Run()
+				gitResult := err == nil
+
+				if ourResult != gitResult {
+					t.Errorf("path %q: our matcher says ignored=%v, git check-ignore says ignored=%v",
+						cp.path, ourResult, gitResult)
+				}
+			}
+		})
+	}
+}
+
 func TestAddPatterns(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
