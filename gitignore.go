@@ -3,15 +3,29 @@ package gitignore
 import (
 	"bufio"
 	"bytes"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
+type segment struct {
+	doubleStar bool
+	raw        string // original glob text; empty if doubleStar
+}
+
 type pattern struct {
-	regex  *regexp.Regexp
-	negate bool
+	segments      []segment
+	negate        bool
+	dirOnly       bool   // trailing slash pattern
+	hasConcrete   bool   // has at least one non-** segment
+	anchored      bool
+	prefix        string // directory scope for nested .gitignore
+	text          string // original pattern text before compilation
+	source        string // file path this pattern came from, empty for programmatic
+	line          int    // 1-based line number in source file
+	literalSuffix string // fast-reject: last segment must end with this (e.g. ".log" from "*.log")
 }
 
 // Matcher checks paths against gitignore rules collected from .gitignore files,
@@ -21,35 +35,214 @@ type pattern struct {
 // Paths passed to Match should use forward slashes. Directory paths must
 // have a trailing slash (e.g. "vendor/") so that directory-only patterns
 // (those written with a trailing slash in .gitignore) match correctly.
+//
+// A Matcher is safe for concurrent use by multiple goroutines once
+// construction is complete (after New, NewFromDirectory, or the last
+// AddPatterns/AddFromFile call). Do not call AddPatterns or AddFromFile
+// concurrently with Match.
 type Matcher struct {
 	patterns []pattern
+	errors   []PatternError
 }
 
-// New creates a Matcher that reads patterns from the repository's
-// .git/info/exclude and root .gitignore. The root parameter should be
-// the repository working directory (containing .git/).
+// PatternError records a pattern that could not be compiled.
+type PatternError struct {
+	Pattern string // the original pattern text
+	Source  string // file path, empty for programmatic patterns
+	Line    int    // 1-based line number
+	Message string
+}
+
+func (e PatternError) Error() string {
+	if e.Source != "" {
+		return e.Source + ":" + itoa(e.Line) + ": invalid pattern: " + e.Pattern + ": " + e.Message
+	}
+	return "invalid pattern: " + e.Pattern + ": " + e.Message
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+// Errors returns any pattern compilation errors encountered while loading
+// patterns. Invalid patterns are silently skipped during matching; this
+// method lets callers detect and report them.
+func (m *Matcher) Errors() []PatternError {
+	return m.errors
+}
+
+// New creates a Matcher that reads patterns from the user's global
+// excludes file (core.excludesfile), the repository's .git/info/exclude,
+// and the root .gitignore. Patterns are loaded in priority order: global
+// excludes first (lowest priority), then .git/info/exclude, then
+// .gitignore (highest priority). Last-match-wins semantics means later
+// patterns override earlier ones.
+//
+// The root parameter should be the repository working directory
+// (containing .git/).
 func New(root string) *Matcher {
 	m := &Matcher{}
+
+	// Read global excludes (lowest priority)
+	if gef := globalExcludesFile(); gef != "" {
+		if data, err := os.ReadFile(gef); err == nil {
+			m.addPatterns(data, "", gef)
+		}
+	}
 
 	// Read .git/info/exclude
 	excludePath := filepath.Join(root, ".git", "info", "exclude")
 	if data, err := os.ReadFile(excludePath); err == nil {
-		m.addPatterns(data, "")
+		m.addPatterns(data, "", excludePath)
 	}
 
-	// Read root .gitignore
+	// Read root .gitignore (highest priority)
 	ignorePath := filepath.Join(root, ".gitignore")
 	if data, err := os.ReadFile(ignorePath); err == nil {
-		m.addPatterns(data, "")
+		m.addPatterns(data, "", ignorePath)
 	}
 
 	return m
 }
 
+// globalExcludesFile returns the path to the user's global gitignore file.
+// It checks (in order): git config core.excludesfile, $XDG_CONFIG_HOME/git/ignore,
+// ~/.config/git/ignore. Returns empty string if none found.
+func globalExcludesFile() string {
+	// Try git config first.
+	out, err := exec.Command("git", "config", "--global", "core.excludesfile").Output()
+	if err == nil {
+		path := strings.TrimSpace(string(out))
+		if path != "" {
+			return expandTilde(path)
+		}
+	}
+
+	// Try XDG_CONFIG_HOME/git/ignore.
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		path := filepath.Join(xdg, "git", "ignore")
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+
+	// Fall back to ~/.config/git/ignore.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(home, ".config", "git", "ignore")
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+
+	return ""
+}
+
+// expandTilde replaces a leading ~ with the user's home directory.
+func expandTilde(path string) string {
+	if !strings.HasPrefix(path, "~") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[1:])
+}
+
+// NewFromDirectory creates a Matcher by walking the directory tree rooted
+// at root, loading every .gitignore file found along the way. Each nested
+// .gitignore is scoped to its containing directory. The .git directory is
+// skipped.
+func NewFromDirectory(root string) *Matcher {
+	m := New(root)
+	_ = walkRecursive(root, "", m, nil)
+	return m
+}
+
+// Walk walks the directory tree rooted at root, calling fn for each file
+// and directory that is not ignored by gitignore rules. It loads .gitignore
+// files as it descends, so patterns from deeper directories take effect for
+// their subtrees. The .git directory is always skipped.
+//
+// Paths passed to fn are relative to root and use the OS path separator.
+// The root directory itself is not passed to fn.
+func Walk(root string, fn func(path string, d fs.DirEntry) error) error {
+	m := New(root)
+	return walkRecursive(root, "", m, fn)
+}
+
+func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) error) error {
+	dir := root
+	if rel != "" {
+		dir = filepath.Join(root, rel)
+	}
+
+	// Load .gitignore for this directory before processing entries.
+	if rel != "" {
+		igPath := filepath.Join(dir, ".gitignore")
+		if _, err := os.Stat(igPath); err == nil {
+			m.AddFromFile(igPath, filepath.ToSlash(rel))
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+
+		// Always skip .git directories.
+		if name == ".git" && entry.IsDir() {
+			continue
+		}
+
+		entryRel := name
+		if rel != "" {
+			entryRel = filepath.Join(rel, name)
+		}
+		matchPath := filepath.ToSlash(entryRel)
+		if entry.IsDir() {
+			matchPath += "/"
+		}
+
+		if m.Match(matchPath) {
+			continue
+		}
+
+		if fn != nil {
+			if err := fn(entryRel, entry); err != nil {
+				return err
+			}
+		}
+
+		if entry.IsDir() {
+			if err := walkRecursive(root, entryRel, m, fn); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 // AddPatterns parses gitignore pattern lines from data and scopes them to
 // the given relative directory. Pass an empty dir for root-level patterns.
 func (m *Matcher) AddPatterns(data []byte, dir string) {
-	m.addPatterns(data, dir)
+	m.addPatterns(data, dir, "")
 }
 
 // AddFromFile reads a .gitignore file at the given absolute path and scopes
@@ -59,7 +252,7 @@ func (m *Matcher) AddFromFile(absPath, relDir string) {
 	if err != nil {
 		return
 	}
-	m.addPatterns(data, relDir)
+	m.addPatterns(data, relDir, absPath)
 }
 
 // Match returns true if the given path should be ignored.
@@ -68,37 +261,173 @@ func (m *Matcher) AddFromFile(absPath, relDir string) {
 // Uses last-match-wins semantics: iterates patterns in reverse and returns
 // on the first match.
 func (m *Matcher) Match(relPath string) bool {
+	isDir := strings.HasSuffix(relPath, "/")
+	if isDir {
+		relPath = relPath[:len(relPath)-1]
+	}
+	return m.match(relPath, isDir)
+}
+
+// MatchPath returns true if the given path should be ignored.
+// Unlike Match, it takes an explicit isDir flag instead of requiring
+// a trailing slash convention. The path should be slash-separated,
+// relative to the repository root, and should not have a trailing slash.
+func (m *Matcher) MatchPath(relPath string, isDir bool) bool {
+	return m.match(relPath, isDir)
+}
+
+// MatchResult describes which pattern matched a path and whether
+// the path is ignored.
+type MatchResult struct {
+	Ignored bool   // true if the path should be ignored
+	Matched bool   // true if any pattern matched (false means no pattern applied)
+	Pattern string // original pattern text (empty if no match)
+	Source  string // file the pattern came from (empty for programmatic patterns)
+	Line    int    // 1-based line number in Source (0 if no match)
+	Negate  bool   // true if the matching pattern was a negation (!)
+}
+
+// MatchDetail returns detailed information about which pattern matched
+// the given path. If no pattern matches, Matched is false and Ignored
+// is false. The path uses the same trailing-slash convention as Match.
+func (m *Matcher) MatchDetail(relPath string) MatchResult {
+	isDir := strings.HasSuffix(relPath, "/")
+	if isDir {
+		relPath = relPath[:len(relPath)-1]
+	}
+	return m.matchDetail(relPath, isDir)
+}
+
+func (m *Matcher) match(relPath string, isDir bool) bool {
+	pathSegs := strings.Split(relPath, "/")
+	lastSeg := pathSegs[len(pathSegs)-1]
+
 	for i := len(m.patterns) - 1; i >= 0; i-- {
-		if m.patterns[i].regex.MatchString(relPath) {
-			return !m.patterns[i].negate
+		p := &m.patterns[i]
+		if p.literalSuffix != "" && !strings.HasSuffix(lastSeg, p.literalSuffix) {
+			continue
 		}
+		if !matchPattern(p, pathSegs, isDir) {
+			continue
+		}
+		return !p.negate
 	}
 	return false
 }
 
-func (m *Matcher) addPatterns(data []byte, dir string) {
+func (m *Matcher) matchDetail(relPath string, isDir bool) MatchResult {
+	pathSegs := strings.Split(relPath, "/")
+	lastSeg := pathSegs[len(pathSegs)-1]
+
+	for i := len(m.patterns) - 1; i >= 0; i-- {
+		p := &m.patterns[i]
+		if p.literalSuffix != "" && !strings.HasSuffix(lastSeg, p.literalSuffix) {
+			continue
+		}
+		if !matchPattern(p, pathSegs, isDir) {
+			continue
+		}
+		return MatchResult{
+			Ignored: !p.negate,
+			Matched: true,
+			Pattern: p.text,
+			Source:  p.source,
+			Line:    p.line,
+			Negate:  p.negate,
+		}
+	}
+	return MatchResult{}
+}
+
+// matchPattern checks whether pathSegs matches the compiled pattern,
+// including the directory prefix scope and dirOnly handling.
+func matchPattern(p *pattern, pathSegs []string, isDir bool) bool {
+	segs := pathSegs
+	if p.prefix != "" {
+		prefixSegs := strings.Split(p.prefix, "/")
+		if len(segs) < len(prefixSegs) {
+			return false
+		}
+		for i, ps := range prefixSegs {
+			if segs[i] != ps {
+				return false
+			}
+		}
+		segs = segs[len(prefixSegs):]
+	}
+
+	if p.dirOnly {
+		// Dir-only patterns (trailing slash): match the directory itself,
+		// or match descendants (files/dirs under the matched directory).
+		if matchSegments(p.segments, segs) {
+			// Exact match. For non-dir paths, the pattern requires a directory.
+			return isDir
+		}
+		// Only do descendant matching when the pattern identifies a specific
+		// directory (has at least one non-** segment). Pure ** patterns like
+		// "**/" only match directory paths directly.
+		if !p.hasConcrete {
+			return false
+		}
+		// Check if the path is a descendant of a matched directory by trying
+		// the pattern against every prefix of the path segments.
+		for end := len(segs) - 1; end >= 1; end-- {
+			if matchSegments(p.segments, segs[:end]) {
+				return true
+			}
+		}
+		return false
+	}
+
+	return matchSegments(p.segments, segs)
+}
+
+func (m *Matcher) addPatterns(data []byte, dir, source string) {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := trimTrailingSpaces(scanner.Text())
 		if line == "" || line[0] == '#' {
 			continue
 		}
-		if p, ok := compilePattern(line, dir); ok {
-			m.patterns = append(m.patterns, p)
+		p, errMsg := compilePattern(line, dir)
+		if errMsg != "" {
+			m.errors = append(m.errors, PatternError{
+				Pattern: line,
+				Source:  source,
+				Line:    lineNum,
+				Message: errMsg,
+			})
+			continue
 		}
+		p.text = line
+		p.source = source
+		p.line = lineNum
+		m.patterns = append(m.patterns, p)
 	}
 }
 
 // trimTrailingSpaces removes unescaped trailing spaces per gitignore spec.
+// Tabs are not stripped (git only strips spaces). A backslash before a space
+// escapes it, so "foo\ " keeps the trailing "\ ".
 func trimTrailingSpaces(s string) string {
-	if strings.HasSuffix(s, `\ `) {
-		return strings.TrimLeft(s, " ")
+	i := len(s)
+	for i > 0 && s[i-1] == ' ' {
+		if i >= 2 && s[i-2] == '\\' {
+			// This space is escaped; stop stripping here.
+			break
+		}
+		i--
 	}
-	return strings.TrimRight(s, " \t")
+	return s[:i]
 }
 
-func compilePattern(line, dir string) (pattern, bool) {
-	p := pattern{}
+// compilePattern compiles a gitignore pattern line into a pattern struct.
+// Returns the compiled pattern and an empty string on success, or a zero
+// pattern and an error message on failure.
+func compilePattern(line, dir string) (pattern, string) {
+	p := pattern{prefix: dir}
 
 	// Handle negation
 	if strings.HasPrefix(line, "!") {
@@ -112,225 +441,175 @@ func compilePattern(line, dir string) (pattern, bool) {
 	}
 
 	if line == "" || line == "/" {
-		return pattern{}, false
+		return pattern{}, "empty pattern"
 	}
 
-	expr := patternToRegex(line, dir)
-	re, err := regexp.Compile(expr)
-	if err != nil {
-		return pattern{}, false
-	}
-	p.regex = re
-	return p, true
-}
-
-// patternToRegex converts a gitignore pattern to a regular expression.
-// The dir parameter scopes patterns from subdirectory .gitignore files.
-//
-// Git's rules (from git-scm.com/docs/gitignore):
-//
-//  1. If the pattern does not contain a slash /, it can match at any directory
-//     level. Equivalent to prepending **/.
-//
-//  2. If there is a separator at the beginning or middle of the pattern, it is
-//     relative to the directory level of the .gitignore file (anchored).
-//     A leading slash is stripped after noting the anchoring.
-//
-//  3. A trailing slash means the pattern matches only directories.
-//
-//  4. A pattern without a trailing slash can match both files and directories.
-//     When it matches a directory, all contents underneath are also matched.
-//
-//  5. ** has special meaning in leading (**/ prefix), trailing (/** suffix),
-//     and middle (/**/) positions.
-func patternToRegex(pat, dir string) string {
-	// Determine if the pattern has a leading slash.
-	hasLeadingSlash := strings.HasPrefix(pat, "/")
-
-	// Determine if the pattern has a trailing slash (directory-only).
-	hasTrailingSlash := strings.HasSuffix(pat, "/") && len(pat) > 1
-
-	// Strip trailing slash for processing; we handle dir-only via the regex.
-	if hasTrailingSlash {
-		pat = strings.TrimSuffix(pat, "/")
+	// Detect and strip trailing slash (directory-only pattern).
+	if len(line) > 1 && line[len(line)-1] == '/' {
+		p.dirOnly = true
+		line = line[:len(line)-1]
 	}
 
-	// Strip leading slash; it's only meaningful for anchoring.
+	// Detect and strip leading slash (anchoring).
+	hasLeadingSlash := line[0] == '/'
 	if hasLeadingSlash {
-		pat = strings.TrimPrefix(pat, "/")
-	}
-
-	segs := strings.Split(pat, "/")
-
-	// Edge case: the `**/` pattern means "match any directory."
-	// After stripping the trailing slash, pat is "**" and segs is ["**"].
-	// Handle this specially: match any path ending with / (a directory).
-	if hasTrailingSlash && len(segs) == 1 && segs[0] == "**" {
-		prefix := ""
-		if dir != "" {
-			prefix = regexp.QuoteMeta(dir) + "/"
-		}
-		return "^" + prefix + ".*/$"
-	}
-
-	// Determine if the pattern contains a slash (after stripping leading/trailing).
-	// A pattern with an internal slash is always anchored.
-	hasMiddleSlash := len(segs) > 1
-
-	// Rule 1: If the pattern has no slash at all (no leading, no trailing, no middle),
-	// it matches at any level. Prepend ** to allow matching in any subdirectory.
-	anchored := hasLeadingSlash || hasMiddleSlash
-	if !anchored {
-		segs = append([]string{"**"}, segs...)
-	}
-
-	// Collapse duplicate ** sequences.
-	for i := len(segs) - 1; i > 0; i-- {
-		if segs[i-1] == "**" && segs[i] == "**" {
-			segs = append(segs[:i], segs[i+1:]...)
+		line = line[1:]
+		if line == "" {
+			return pattern{}, "empty pattern"
 		}
 	}
 
-	var expr bytes.Buffer
-	expr.WriteString("^")
+	// Split into segments on '/'.
+	rawSegs := strings.Split(line, "/")
 
-	// Prefix with directory scope for patterns from subdirectory .gitignore files
-	if dir != "" {
-		expr.WriteString(regexp.QuoteMeta(dir))
-		expr.WriteString("/")
+	// Determine anchoring: leading slash, or pattern contains a slash.
+	p.anchored = hasLeadingSlash || len(rawSegs) > 1
+
+	// Build segment list.
+	segs := make([]segment, 0, len(rawSegs)+2)
+
+	// If not anchored, prepend ** so it matches at any directory level.
+	if !p.anchored {
+		segs = append(segs, segment{doubleStar: true})
 	}
 
-	needSlash := false
-	end := len(segs) - 1
-
-	for i, seg := range segs {
-		switch seg {
-		case "**":
-			switch {
-			case i == 0 && i == end:
-				// Pattern is just **: match everything
-				expr.WriteString(".+")
-			case i == 0:
-				// Leading **: match any leading path segments (including none)
-				expr.WriteString("(?:.+/)?")
-				needSlash = false
-			case i == end:
-				// Trailing **: match any trailing path segments
-				expr.WriteString("(?:/.+)?")
-			default:
-				// Inner **: match zero or more path segments
-				expr.WriteString("(?:/.+)?")
-				needSlash = true
-			}
-		default:
-			if needSlash {
-				expr.WriteString("/")
-			}
-			expr.WriteString(globToRegex(seg))
-			needSlash = true
+	for _, raw := range rawSegs {
+		if raw == "**" {
+			segs = append(segs, segment{doubleStar: true})
+		} else {
+			segs = append(segs, segment{raw: raw})
 		}
 	}
 
-	// Handle what this pattern matches beyond its literal path:
-	if hasTrailingSlash {
-		// Directory-only pattern: requires a trailing slash (indicating a
-		// directory) and optionally matches all contents underneath.
-		// Does NOT match the same name as a file (no trailing slash).
-		expr.WriteString("/.*")
-	} else if segs[end] != "**" {
-		// Non-dir-only, non-** ending: matches the path itself as either
-		// a file or directory, plus all directory contents.
-		// Trailing slash in the match string indicates a directory.
-		expr.WriteString("(?:/.*)?")
-	}
-
-	expr.WriteString("$")
-	return expr.String()
-}
-
-func globToRegex(glob string) string {
-	var buf bytes.Buffer
-	escaped := false
-	for i := 0; i < len(glob); i++ {
-		ch := glob[i]
-		switch {
-		case escaped:
-			escaped = false
-			buf.WriteString(regexp.QuoteMeta(string(ch)))
-		case ch == '\\':
-			escaped = true
-		case ch == '*':
-			buf.WriteString("[^/]*")
-		case ch == '?':
-			buf.WriteString("[^/]")
-		case ch == '[':
-			buf.WriteString(parseBracket(&i, glob))
-		default:
-			buf.WriteString(regexp.QuoteMeta(string(ch)))
-		}
-	}
-	return buf.String()
-}
-
-func parseBracket(i *int, glob string) string {
-	*i++
-	j := *i
-
-	// Handle negation (! or ^)
-	if j < len(glob) && (glob[j] == '!' || glob[j] == '^') {
-		j++
-	}
-	// Handle ] at start of bracket expression
-	if j < len(glob) && glob[j] == ']' {
-		j++
-	}
-	// Find closing bracket, skipping escape sequences and POSIX character classes
-	for j < len(glob) && glob[j] != ']' {
-		if glob[j] == '\\' && j+1 < len(glob) {
-			j += 2 // skip escaped character
+	// Collapse consecutive ** segments.
+	collapsed := segs[:1]
+	for i := 1; i < len(segs); i++ {
+		if segs[i].doubleStar && collapsed[len(collapsed)-1].doubleStar {
 			continue
 		}
-		if glob[j] == '[' && j+1 < len(glob) && glob[j+1] == ':' {
-			// Skip past the POSIX class to its closing :]
-			end := strings.Index(glob[j+2:], ":]")
-			if end != -1 {
-				j += end + 4 // skip [: + class name + :]
+		collapsed = append(collapsed, segs[i])
+	}
+	segs = collapsed
+
+	// Validate bracket expressions: check closing ] exists and POSIX class names are valid.
+	for _, seg := range segs {
+		if seg.doubleStar {
+			continue
+		}
+		if msg := validateBrackets(seg.raw); msg != "" {
+			return pattern{}, msg
+		}
+	}
+
+	// Append implicit ** at end for non-dir-only patterns so that matching
+	// "foo" also matches "foo/anything". Dir-only patterns handle descendants
+	// separately in matchPattern.
+	if !p.dirOnly {
+		if len(segs) == 0 || !segs[len(segs)-1].doubleStar {
+			segs = append(segs, segment{doubleStar: true})
+		}
+	}
+
+	p.segments = segs
+	for _, s := range segs {
+		if !s.doubleStar {
+			p.hasConcrete = true
+			break
+		}
+	}
+	p.literalSuffix = extractLiteralSuffix(segs)
+	return p, ""
+}
+
+// extractLiteralSuffix finds the literal trailing portion of the last concrete
+// segment, for fast rejection. For example, "*.log" yields ".log", "test_*.go"
+// yields ".go". Only extracts a suffix when the segment is a simple star-prefix
+// glob with no brackets, escapes, or question marks in the suffix portion.
+func extractLiteralSuffix(segs []segment) string {
+	// Find the last non-** segment.
+	var last string
+	for i := len(segs) - 1; i >= 0; i-- {
+		if !segs[i].doubleStar {
+			last = segs[i].raw
+			break
+		}
+	}
+	if last == "" {
+		return ""
+	}
+
+	// Find the last * in the segment. Everything after it must be literal.
+	starIdx := strings.LastIndex(last, "*")
+	if starIdx < 0 {
+		return ""
+	}
+	suffix := last[starIdx+1:]
+	if suffix == "" {
+		return ""
+	}
+
+	// Bail if the suffix contains wildcards, brackets, or escapes.
+	for i := 0; i < len(suffix); i++ {
+		switch suffix[i] {
+		case '*', '?', '[', '\\':
+			return ""
+		}
+	}
+	return suffix
+}
+
+// validateBrackets checks that all bracket expressions in a glob segment
+// have valid closing brackets and known POSIX class names.
+// Returns empty string on success, or an error message.
+func validateBrackets(glob string) string {
+	for i := 0; i < len(glob); i++ {
+		if glob[i] == '\\' && i+1 < len(glob) {
+			i++ // skip escaped char
+			continue
+		}
+		if glob[i] != '[' {
+			continue
+		}
+		// Find the matching close bracket.
+		j := i + 1
+		if j < len(glob) && (glob[j] == '!' || glob[j] == '^') {
+			j++
+		}
+		if j < len(glob) && glob[j] == ']' {
+			j++ // ] as first char is literal
+		}
+		for j < len(glob) && glob[j] != ']' {
+			if glob[j] == '\\' && j+1 < len(glob) {
+				j += 2
 				continue
 			}
+			if glob[j] == '[' && j+1 < len(glob) && glob[j+1] == ':' {
+				end := findPosixClassEnd(glob, j+2)
+				if end >= 0 {
+					name := glob[j+2 : end]
+					if !validPosixClassName(name) {
+						return "unknown POSIX class [:" + name + ":]"
+					}
+					j = end + 2
+					continue
+				}
+			}
+			j++
 		}
-		j++
-	}
-	if j >= len(glob) {
-		// No closing bracket, treat [ as literal
-		*i--
-		return regexp.QuoteMeta("[")
-	}
-
-	// j points at closing bracket
-	raw := glob[*i:j]
-	*i = j // for loop will increment past ]
-
-	// Build regex bracket content, resolving escape sequences.
-	// In wildmatch, \X inside brackets means literal X.
-	var buf strings.Builder
-	k := 0
-
-	// Convert ! to ^ for regex negation
-	if k < len(raw) && raw[k] == '!' {
-		buf.WriteByte('^')
-		k++
-	}
-
-	for k < len(raw) {
-		if raw[k] == '\\' && k+1 < len(raw) {
-			k++
-			buf.WriteString(regexp.QuoteMeta(string(raw[k])))
-			k++
-		} else {
-			buf.WriteByte(raw[k])
-			k++
+		if j >= len(glob) {
+			// No closing bracket; treat [ as literal (this is fine).
+			continue
 		}
+		i = j // skip to closing ]
 	}
+	return ""
+}
 
-	return "[" + buf.String() + "]"
+func validPosixClassName(name string) bool {
+	switch name {
+	case "alnum", "alpha", "blank", "cntrl", "digit", "graph",
+		"lower", "print", "punct", "space", "upper", "xdigit":
+		return true
+	}
+	return false
 }

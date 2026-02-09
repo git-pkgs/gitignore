@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/git-pkgs/gitignore"
@@ -1318,6 +1319,41 @@ func TestMatchTrailingSpacesStripped(t *testing.T) {
 	}
 }
 
+func TestMatchTrailingSpacesEdgeCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		path    string
+		want    bool
+	}{
+		// Spaces before an escaped space: "foo   \ " → pattern is "foo   \ "
+		{"spaces before escaped space", "foo   \\ ", "foo    ", true},
+		{"spaces before escaped space no match", "foo   \\ ", "foo", false},
+
+		// Multiple escaped spaces: "hello\ \ " → pattern is "hello\ \ "
+		{"multiple escaped spaces", "hello\\ \\ ", "hello  ", true},
+		{"multiple escaped spaces no match short", "hello\\ \\ ", "hello ", false},
+
+		// Trailing tabs preserved (git only strips spaces, not tabs)
+		{"trailing tab preserved", "hello\t", "hello\t", true},
+		{"trailing tab not stripped", "hello\t", "hello", false},
+
+		// Leading spaces preserved
+		{"leading spaces preserved", "  hello", "  hello", true},
+		{"leading spaces preserved no match", "  hello", "hello", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := setupMatcher(t, tt.pattern+"\n")
+			got := m.Match(tt.path)
+			if got != tt.want {
+				t.Errorf("pattern %q, Match(%q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMatchCommentLines(t *testing.T) {
 	m := setupMatcher(t, "# this is a comment\nfoo\n# another comment\nbar\n")
 
@@ -1896,6 +1932,553 @@ func TestWildmatchVsGitCheckIgnore(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGlobalExcludesFileXDG(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up a fake XDG_CONFIG_HOME with a global ignore file.
+	xdgDir := t.TempDir()
+	gitConfigDir := filepath.Join(xdgDir, "git")
+	if err := os.MkdirAll(gitConfigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitConfigDir, "ignore"), []byte("*.global-ignore\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", xdgDir)
+	// Clear any git config that might override.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+
+	m := gitignore.New(root)
+
+	if !m.Match("test.global-ignore") {
+		t.Error("expected global excludes pattern to match")
+	}
+	if m.Match("test.go") {
+		t.Error("expected test.go to not be ignored")
+	}
+}
+
+func TestGlobalExcludesFilePriority(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Root .gitignore re-includes *.global-ignore
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("!*.global-ignore\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Global excludes ignores *.global-ignore
+	xdgDir := t.TempDir()
+	gitConfigDir := filepath.Join(xdgDir, "git")
+	if err := os.MkdirAll(gitConfigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitConfigDir, "ignore"), []byte("*.global-ignore\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", xdgDir)
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+
+	m := gitignore.New(root)
+
+	// Root .gitignore (higher priority) re-includes the file.
+	if m.Match("test.global-ignore") {
+		t.Error("expected root negation to override global excludes")
+	}
+}
+
+func TestExpandTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+
+	// Test via a global git config that uses ~
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a temp ignore file in a known location under home
+	ignoreDir := filepath.Join(home, ".test-gitignore-expand-tilde")
+	if err := os.MkdirAll(ignoreDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(ignoreDir) }()
+
+	ignoreFile := filepath.Join(ignoreDir, "ignore")
+	if err := os.WriteFile(ignoreFile, []byte("*.tilde-test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure git to use this file via tilde path.
+	gitConfigDir := t.TempDir()
+	gitConfigFile := filepath.Join(gitConfigDir, "config")
+	if err := os.WriteFile(gitConfigFile, []byte("[core]\n\texcludesfile = ~/.test-gitignore-expand-tilde/ignore\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", gitConfigFile)
+
+	m := gitignore.New(root)
+	if !m.Match("foo.tilde-test") {
+		t.Error("expected tilde-expanded global excludes to match")
+	}
+}
+
+func TestNewFromDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Root .gitignore
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create directory structure with nested .gitignore
+	for _, dir := range []string{"src", "src/lib", "vendor"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", ".gitignore"), []byte("*.tmp\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "lib", ".gitignore"), []byte("*.gen.go\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create files so the walk discovers directories
+	for _, f := range []string{"src/main.go", "src/lib/util.go", "vendor/lib.go"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := gitignore.NewFromDirectory(root)
+
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"app.log", true},          // root pattern
+		{"src/app.log", true},      // root pattern applies in subdirs
+		{"src/cache.tmp", true},    // src/.gitignore pattern
+		{"cache.tmp", false},       // src pattern scoped to src/
+		{"src/lib/foo.gen.go", true}, // src/lib/.gitignore pattern
+		{"src/foo.gen.go", false},  // lib pattern scoped to src/lib/
+		{"src/main.go", false},
+	}
+
+	for _, tt := range tests {
+		got := m.Match(tt.path)
+		if got != tt.want {
+			t.Errorf("Match(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestMatchPath(t *testing.T) {
+	m := setupMatcher(t, "vendor/\n*.log\nbuild\n")
+
+	tests := []struct {
+		path  string
+		isDir bool
+		want  bool
+	}{
+		{"vendor", true, true},
+		{"vendor", false, false},       // dir-only pattern, file doesn't match
+		{"app.log", false, true},
+		{"logs/app.log", false, true},
+		{"build", false, true},
+		{"build", true, true},
+		{"build/output.js", false, true},
+		{"src/main.go", false, false},
+	}
+
+	for _, tt := range tests {
+		got := m.MatchPath(tt.path, tt.isDir)
+		if got != tt.want {
+			t.Errorf("MatchPath(%q, isDir=%v) = %v, want %v", tt.path, tt.isDir, got, tt.want)
+		}
+	}
+}
+
+func TestMatchPathConsistentWithMatch(t *testing.T) {
+	m := setupMatcher(t, "*.log\nbuild/\n/dist\nfoo/**/bar\n")
+
+	paths := []string{
+		"app.log", "build/", "dist", "dist/", "foo/bar", "foo/a/bar",
+		"src/main.go", "build/out.js",
+	}
+	for _, p := range paths {
+		matchResult := m.Match(p)
+		isDir := strings.HasSuffix(p, "/")
+		clean := strings.TrimSuffix(p, "/")
+		pathResult := m.MatchPath(clean, isDir)
+		if matchResult != pathResult {
+			t.Errorf("Match(%q)=%v but MatchPath(%q, %v)=%v", p, matchResult, clean, isDir, pathResult)
+		}
+	}
+}
+
+func TestNewFromDirectorySkipsIgnoredDirs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("ignored_dir/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an ignored directory with its own .gitignore
+	if err := os.MkdirAll(filepath.Join(root, "ignored_dir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// This .gitignore should NOT be loaded since the dir is ignored.
+	if err := os.WriteFile(filepath.Join(root, "ignored_dir", ".gitignore"), []byte("!*.important\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a non-ignored directory
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "main.go"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := gitignore.NewFromDirectory(root)
+
+	if !m.Match("ignored_dir/") {
+		t.Error("expected ignored_dir/ to be ignored")
+	}
+	if m.Match("src/main.go") {
+		t.Error("expected src/main.go to not be ignored")
+	}
+}
+
+func TestWalk(t *testing.T) {
+	// Isolate from user's global git config.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\nbuild/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create directory structure
+	for _, dir := range []string{"src", "build", "src/nested"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create files
+	for _, f := range []string{
+		"README.md",
+		"src/main.go",
+		"src/nested/util.go",
+		"src/debug.log",
+		"build/output.js",
+	} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var collected []string
+	err := gitignore.Walk(root, func(path string, d os.DirEntry) error {
+		collected = append(collected, filepath.ToSlash(path))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should include non-ignored files and directories
+	want := map[string]bool{
+		".gitignore":       true,
+		"README.md":        true,
+		"src":              true,
+		"src/main.go":      true,
+		"src/nested":       true,
+		"src/nested/util.go": true,
+	}
+
+	// Should NOT include
+	noWant := map[string]bool{
+		"build":          true,
+		"build/output.js": true,
+		"src/debug.log":  true,
+		".git":           true,
+	}
+
+	got := make(map[string]bool)
+	for _, p := range collected {
+		got[p] = true
+	}
+
+	for w := range want {
+		if !got[w] {
+			t.Errorf("Walk missing expected path %q", w)
+		}
+	}
+	for nw := range noWant {
+		if got[nw] {
+			t.Errorf("Walk should not have yielded %q", nw)
+		}
+	}
+}
+
+func TestWalkNestedGitignore(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create src/ with its own .gitignore that ignores *.tmp
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", ".gitignore"), []byte("*.tmp\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, f := range []string{"src/main.go", "src/cache.tmp", "root.tmp"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var collected []string
+	err := gitignore.Walk(root, func(path string, d os.DirEntry) error {
+		collected = append(collected, filepath.ToSlash(path))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(map[string]bool)
+	for _, p := range collected {
+		got[p] = true
+	}
+
+	if !got["src/main.go"] {
+		t.Error("Walk should yield src/main.go")
+	}
+	if got["src/cache.tmp"] {
+		t.Error("Walk should not yield src/cache.tmp (ignored by src/.gitignore)")
+	}
+	if !got["root.tmp"] {
+		t.Error("Walk should yield root.tmp (not under src/)")
+	}
+}
+
+func TestWalkSkipsGitDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var collected []string
+	err := gitignore.Walk(root, func(path string, d os.DirEntry) error {
+		collected = append(collected, filepath.ToSlash(path))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range collected {
+		if p == ".git" || strings.HasPrefix(p, ".git/") {
+			t.Errorf("Walk should not yield .git paths, got %q", p)
+		}
+	}
+}
+
+func TestErrors(t *testing.T) {
+	// Invalid POSIX class name produces an error.
+	m := setupMatcher(t, "valid.log\n[[:spaci:]]\ninvalid[[:nope:]]pattern\nalso-valid\n")
+
+	errs := m.Errors()
+	if len(errs) != 2 {
+		t.Fatalf("expected 2 errors, got %d: %v", len(errs), errs)
+	}
+
+	if errs[0].Pattern != "[[:spaci:]]" {
+		t.Errorf("error[0].Pattern = %q, want %q", errs[0].Pattern, "[[:spaci:]]")
+	}
+	if errs[0].Line != 2 {
+		t.Errorf("error[0].Line = %d, want 2", errs[0].Line)
+	}
+	if !strings.Contains(errs[0].Message, "spaci") {
+		t.Errorf("error[0].Message = %q, want it to mention the class name", errs[0].Message)
+	}
+
+	if errs[1].Pattern != "invalid[[:nope:]]pattern" {
+		t.Errorf("error[1].Pattern = %q, want %q", errs[1].Pattern, "invalid[[:nope:]]pattern")
+	}
+	if errs[1].Line != 3 {
+		t.Errorf("error[1].Line = %d, want 3", errs[1].Line)
+	}
+
+	// Valid patterns still work.
+	if !m.Match("valid.log") {
+		t.Error("expected valid.log to match")
+	}
+	if !m.Match("also-valid") {
+		t.Error("expected also-valid to match")
+	}
+}
+
+func TestErrorsFromFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n[[:bogus:]]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	m := gitignore.New(root)
+
+	errs := m.Errors()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(errs))
+	}
+	if errs[0].Source == "" {
+		t.Error("expected error to have a source file path")
+	}
+	errStr := errs[0].Error()
+	if !strings.Contains(errStr, "bogus") {
+		t.Errorf("error string %q should mention the class name", errStr)
+	}
+	if !strings.Contains(errStr, ".gitignore") {
+		t.Errorf("error string %q should mention the source file", errStr)
+	}
+}
+
+func TestMatchDetail(t *testing.T) {
+	m := setupMatcher(t, "*.log\n!important.log\nbuild/\n")
+
+	// File matched by *.log
+	r := m.MatchDetail("app.log")
+	if !r.Matched || !r.Ignored {
+		t.Errorf("app.log: Matched=%v Ignored=%v, want true/true", r.Matched, r.Ignored)
+	}
+	if r.Pattern != "*.log" {
+		t.Errorf("app.log: Pattern=%q, want %q", r.Pattern, "*.log")
+	}
+	if r.Line != 1 {
+		t.Errorf("app.log: Line=%d, want 1", r.Line)
+	}
+
+	// File negated by !important.log
+	r = m.MatchDetail("important.log")
+	if !r.Matched || r.Ignored {
+		t.Errorf("important.log: Matched=%v Ignored=%v, want true/false", r.Matched, r.Ignored)
+	}
+	if r.Pattern != "!important.log" {
+		t.Errorf("important.log: Pattern=%q, want %q", r.Pattern, "!important.log")
+	}
+	if !r.Negate {
+		t.Error("important.log: Negate should be true")
+	}
+	if r.Line != 2 {
+		t.Errorf("important.log: Line=%d, want 2", r.Line)
+	}
+
+	// Directory matched by build/
+	r = m.MatchDetail("build/")
+	if !r.Matched || !r.Ignored {
+		t.Errorf("build/: Matched=%v Ignored=%v, want true/true", r.Matched, r.Ignored)
+	}
+	if r.Pattern != "build/" {
+		t.Errorf("build/: Pattern=%q, want %q", r.Pattern, "build/")
+	}
+
+	// No match
+	r = m.MatchDetail("src/main.go")
+	if r.Matched || r.Ignored {
+		t.Errorf("src/main.go: Matched=%v Ignored=%v, want false/false", r.Matched, r.Ignored)
+	}
+	if r.Pattern != "" {
+		t.Errorf("src/main.go: Pattern=%q, want empty", r.Pattern)
+	}
+}
+
+func TestMatchDetailSource(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	m := gitignore.New(root)
+
+	r := m.MatchDetail("app.log")
+	if !r.Matched {
+		t.Fatal("expected match")
+	}
+	if !strings.HasSuffix(r.Source, ".gitignore") {
+		t.Errorf("Source=%q, want it to end with .gitignore", r.Source)
+	}
+}
+
+func TestMatchDetailConsistentWithMatch(t *testing.T) {
+	m := setupMatcher(t, "*.log\n!important.log\nbuild/\n/dist\n")
+
+	paths := []string{
+		"app.log", "important.log", "build/", "dist", "dist/",
+		"src/main.go", "build/out.js", "sub/app.log",
+	}
+	for _, p := range paths {
+		matchResult := m.Match(p)
+		detail := m.MatchDetail(p)
+		if matchResult != detail.Ignored {
+			t.Errorf("Match(%q)=%v but MatchDetail.Ignored=%v", p, matchResult, detail.Ignored)
+		}
+	}
+}
+
+func TestErrorsEmpty(t *testing.T) {
+	m := setupMatcher(t, "*.log\nbuild/\n")
+	if len(m.Errors()) != 0 {
+		t.Errorf("expected no errors, got %v", m.Errors())
 	}
 }
 
