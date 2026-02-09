@@ -1568,9 +1568,30 @@ func TestWildmatchBracketEdgeCases(t *testing.T) {
 		// Negation with ] edge case
 		{"[!]-]", "]", false},
 
-		// Backslash-dash-caret range
-		{"[\\-^]", "]", true},
-		{"[\\-^]", "[", false},
+		// Backslash escapes inside brackets (wildmatch: \X = literal X)
+		{"[\\-_]", "-", true},          // \- = literal dash
+		{"[\\-_]", "_", true},
+		{"[\\-_]", "a", false},
+		{"[\\]]", "]", true},           // \] = literal ]
+		{"[\\\\]", "\\", true},         // \\ = literal backslash
+		{"[!\\\\]", "\\", false},       // negated literal backslash
+		{"[!\\\\]", "a", true},
+		{"[A-\\\\]", "G", true},        // range A(65) to \(92)
+
+		// Range with \\ as endpoint: range \(92) to ^(94)
+		{"[\\\\-^]", "]", true},        // ](93) is in range
+		{"[\\\\-^]", "[", false},       // [(91) is not
+
+		// Range via escaped endpoints: \1=1, \3=3, range 1-3
+		{"[\\1-\\3]", "2", true},
+		{"[\\1-\\3]", "3", true},
+		{"[\\1-\\3]", "4", false},
+
+		// Range from [ to ] via escaped ]: [(91) to ](93)
+		{"[[-\\]]", "\\", true},        // \(92) in range
+		{"[[-\\]]", "[", true},         // [(91) in range
+		{"[[-\\]]", "]", true},         // ](93) in range
+		{"[[-\\]]", "-", false},        // -(45) not in range
 
 		// Various dash/range positions
 		{"[-]", "-", true},
@@ -1580,8 +1601,9 @@ func TestWildmatchBracketEdgeCases(t *testing.T) {
 
 		// Comma in bracket
 		{"[,]", ",", true},
-		{"[\\,]", ",", true},
-		{"[\\,]", "\\", true},
+		{"[\\\\,]", ",", true},         // \\=literal backslash, comma=literal
+		{"[\\\\,]", "\\", true},
+		{"[\\,]", ",", true},           // \,=literal comma
 
 		// Caret as literal in bracket (not at start)
 		{"[a^bc]", "^", true},
