@@ -1,10 +1,17 @@
 # gitignore
 
-A standalone Go library for matching paths against gitignore rules. Built to replace go-git's broken gitignore matcher with something that actually passes git's own wildmatch test suite.
+A Go library for matching paths against gitignore rules. Pattern matching uses a direct wildmatch implementation (two-pointer backtracking, same algorithm as git's `wildmatch.c`) rather than compiling patterns to regexes or delegating to `filepath.Match`
 
-Pattern matching uses a direct wildmatch implementation (two-pointer backtracking, same algorithm as git's wildmatch.c) rather than compiling patterns to regexes. This gets you correct bracket expressions, POSIX character classes, proper `**` handling, and about 10-20x better performance than regex-based approaches.
-
-Handles the full gitignore spec: negation patterns, `**` globs, bracket expressions with POSIX character classes, directory-only patterns, escaped characters, `core.excludesfile`, and scoped patterns from nested `.gitignore` files.
+- Wildmatch engine modeled on git's own `wildmatch.c`, tested against git's wildmatch test suite
+- Bracket expressions with ranges, negation, backslash escapes, and all 12 POSIX character classes (`[:alnum:]`, `[:alpha:]`, etc.)
+- Proper `**` handling (zero or more directories, only when standalone between separators)
+- `core.excludesfile` support with XDG fallback
+- Automatic nested `.gitignore` discovery via `NewFromDirectory` and `Walk`
+- Negation patterns with correct last-match-wins semantics
+- Directory-only patterns (trailing `/`) with descendant matching
+- Match provenance via `MatchDetail` (which pattern, file, and line number matched)
+- Invalid pattern surfacing via `Errors()`
+- Literal suffix fast-reject for common patterns like `*.log`
 
 ```go
 import "github.com/git-pkgs/gitignore"
@@ -79,3 +86,7 @@ A Matcher is safe for concurrent `Match`/`MatchPath`/`MatchDetail` calls once co
 ## Match semantics
 
 Paths should use forward slashes and be relative to the repository root. Last-match-wins, same as git.
+
+## License
+
+MIT
