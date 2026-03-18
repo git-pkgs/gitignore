@@ -1,5 +1,9 @@
 package gitignore
 
+// posixClassOffset is the number of characters in the POSIX class delimiters
+// "[:" and ":]", used when skipping past them during bracket parsing.
+const posixClassOffset = 2
+
 // matchSegments matches path segments against pattern segments using two-pointer
 // backtracking. A doubleStar segment matches zero or more path segments.
 func matchSegments(patSegs []segment, pathSegs []string) bool {
@@ -127,7 +131,6 @@ func matchBracket(glob string, pos int, ch byte) (bool, int, bool) {
 
 	for i < len(glob) {
 		if glob[i] == ']' && !first {
-			// End of bracket expression.
 			if negate {
 				matched = !matched
 			}
@@ -135,53 +138,48 @@ func matchBracket(glob string, pos int, ch byte) (bool, int, bool) {
 		}
 		first = false
 
-		// POSIX character class: [:name:]
-		if glob[i] == '[' && i+1 < len(glob) && glob[i+1] == ':' {
-			end := findPosixClassEnd(glob, i+2)
-			if end >= 0 {
-				name := glob[i+2 : end]
-				if matchPosixClass(name, ch) {
-					matched = true
-				}
-				i = end + 2 // skip past :]
-				continue
-			}
-			// No closing :], treat [ as literal.
-		}
-
-		// Resolve the current character (possibly escaped).
-		var lo byte
-		if glob[i] == '\\' && i+1 < len(glob) {
-			i++
-			lo = glob[i]
-		} else {
-			lo = glob[i]
-		}
-		i++
-
-		// Check for range: lo-hi
-		if i+1 < len(glob) && glob[i] == '-' && glob[i+1] != ']' {
-			i++ // skip -
-			var hi byte
-			if glob[i] == '\\' && i+1 < len(glob) {
-				i++
-				hi = glob[i]
-			} else {
-				hi = glob[i]
-			}
-			i++
-			if ch >= lo && ch <= hi {
-				matched = true
-			}
-		} else {
-			if ch == lo {
-				matched = true
-			}
+		var hit bool
+		hit, i = matchBracketElement(glob, i, ch)
+		if hit {
+			matched = true
 		}
 	}
 
-	// No closing ] found.
 	return false, 0, false
+}
+
+// matchBracketElement matches a single element inside a bracket expression:
+// a POSIX class ([:name:]), a range (lo-hi), or a literal character.
+// Returns whether ch matched and the new index past the element.
+func matchBracketElement(glob string, i int, ch byte) (bool, int) {
+	// POSIX character class: [:name:]
+	if glob[i] == '[' && i+1 < len(glob) && glob[i+1] == ':' {
+		end := findPosixClassEnd(glob, i+posixClassOffset)
+		if end >= 0 {
+			name := glob[i+posixClassOffset : end]
+			return matchPosixClass(name, ch), end + posixClassOffset
+		}
+	}
+
+	lo, next := readBracketChar(glob, i)
+	i = next
+
+	// Check for range: lo-hi
+	if i+1 < len(glob) && glob[i] == '-' && glob[i+1] != ']' {
+		i++ // skip -
+		hi, next := readBracketChar(glob, i)
+		return ch >= lo && ch <= hi, next
+	}
+	return ch == lo, i
+}
+
+// readBracketChar reads a single (possibly escaped) character from a bracket
+// expression and returns the character and the index after it.
+func readBracketChar(glob string, i int) (byte, int) {
+	if glob[i] == '\\' && i+1 < len(glob) {
+		return glob[i+1], i + posixClassOffset
+	}
+	return glob[i], i + 1
 }
 
 // findPosixClassEnd finds the position of ':' in ":]" after startPos.
@@ -195,34 +193,33 @@ func findPosixClassEnd(glob string, startPos int) int {
 	return -1
 }
 
-// matchPosixClass checks whether byte ch belongs to the named POSIX character class.
-func matchPosixClass(name string, ch byte) bool {
-	switch name {
-	case "alnum":
+// posixClassMatchers maps POSIX character class names to their match functions.
+var posixClassMatchers = map[string]func(byte) bool{
+	"alnum": func(ch byte) bool {
 		return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9'
-	case "alpha":
-		return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z'
-	case "blank":
-		return ch == ' ' || ch == '\t'
-	case "cntrl":
-		return ch < 0x20 || ch == 0x7f
-	case "digit":
-		return ch >= '0' && ch <= '9'
-	case "graph":
-		return ch > 0x20 && ch < 0x7f
-	case "lower":
-		return ch >= 'a' && ch <= 'z'
-	case "print":
-		return ch >= 0x20 && ch < 0x7f
-	case "punct":
+	},
+	"alpha": func(ch byte) bool { return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' },
+	"blank": func(ch byte) bool { return ch == ' ' || ch == '\t' },
+	"cntrl": func(ch byte) bool { return ch < 0x20 || ch == 0x7f },
+	"digit": func(ch byte) bool { return ch >= '0' && ch <= '9' },
+	"graph": func(ch byte) bool { return ch > 0x20 && ch < 0x7f },
+	"lower": func(ch byte) bool { return ch >= 'a' && ch <= 'z' },
+	"print": func(ch byte) bool { return ch >= 0x20 && ch < 0x7f },
+	"punct": func(ch byte) bool {
 		return ch > 0x20 && ch < 0x7f &&
 			(ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9')
-	case "space":
+	},
+	"space": func(ch byte) bool {
 		return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v'
-	case "upper":
-		return ch >= 'A' && ch <= 'Z'
-	case "xdigit":
-		return ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f' || ch >= 'A' && ch <= 'F'
+	},
+	"upper":  func(ch byte) bool { return ch >= 'A' && ch <= 'Z' },
+	"xdigit": func(ch byte) bool { return ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f' || ch >= 'A' && ch <= 'F' },
+}
+
+// matchPosixClass checks whether byte ch belongs to the named POSIX character class.
+func matchPosixClass(name string, ch byte) bool {
+	if fn, ok := posixClassMatchers[name]; ok {
+		return fn(ch)
 	}
 	return false
 }

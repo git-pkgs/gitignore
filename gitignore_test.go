@@ -13,14 +13,76 @@ import (
 
 func setupMatcher(t *testing.T, gitignoreContent string) *gitignore.Matcher {
 	t.Helper()
+	return gitignore.New(setupMatcherRoot(t, gitignoreContent))
+}
+
+type checkPath struct {
+	path  string
+	isDir bool
+}
+
+// initGitRepo creates a temporary git repo with the given .gitignore content
+// and returns the root directory.
+func initGitRepo(t *testing.T, patterns string) string {
+	t.Helper()
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+	for _, args := range [][]string{
+		{"git", "init", "--initial-branch=main"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "config", "commit.gpgsign", "false"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = root
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("git init: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(patterns), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(gitignoreContent), 0644); err != nil {
-		t.Fatal(err)
+	return root
+}
+
+// createCheckPaths creates files and directories in root for each checkPath.
+func createCheckPaths(t *testing.T, root string, paths []checkPath) {
+	t.Helper()
+	for _, cp := range paths {
+		full := filepath.Join(root, cp.path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if cp.isDir {
+			if err := os.MkdirAll(full, 0755); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if err := os.WriteFile(full, []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
-	return gitignore.New(root)
+}
+
+// compareWithGit compares our matcher results against git check-ignore for
+// each path, failing on any disagreement.
+func compareWithGit(t *testing.T, root string, m *gitignore.Matcher, paths []checkPath) {
+	t.Helper()
+	for _, cp := range paths {
+		matchPath := cp.path
+		if cp.isDir {
+			matchPath += "/"
+		}
+		ourResult := m.Match(matchPath)
+		cmd := exec.Command("git", "check-ignore", "-q", cp.path)
+		cmd.Dir = root
+		err := cmd.Run()
+		gitResult := err == nil
+		if ourResult != gitResult {
+			t.Errorf("path %q: our matcher says ignored=%v, git check-ignore says ignored=%v",
+				cp.path, ourResult, gitResult)
+		}
+	}
 }
 
 func TestMatchBasicPatterns(t *testing.T) {
@@ -103,25 +165,37 @@ func TestMatchDoubleStarPatterns(t *testing.T) {
 	}
 }
 
-func TestMatchScopedPatterns(t *testing.T) {
+// setupMatcherRoot creates a temp dir with .git/info and a root .gitignore.
+func setupMatcherRoot(t *testing.T, gitignoreContent string) string {
+	t.Helper()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(""), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(gitignoreContent), 0644); err != nil {
 		t.Fatal(err)
 	}
+	return root
+}
 
-	// Create a nested .gitignore
-	if err := os.MkdirAll(filepath.Join(root, "src"), 0755); err != nil {
+// setupScopedMatcher creates a matcher with a root .gitignore and a nested
+// .gitignore in the given subdirectory.
+func setupScopedMatcher(t *testing.T, rootPatterns, subDir, subPatterns string) *gitignore.Matcher {
+	t.Helper()
+	root := setupMatcherRoot(t, rootPatterns)
+	if err := os.MkdirAll(filepath.Join(root, subDir), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "src", ".gitignore"), []byte("*.generated.go\ntmp/\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, subDir, ".gitignore"), []byte(subPatterns), 0644); err != nil {
 		t.Fatal(err)
 	}
-
 	m := gitignore.New(root)
-	m.AddFromFile(filepath.Join(root, "src", ".gitignore"), "src")
+	m.AddFromFile(filepath.Join(root, subDir, ".gitignore"), subDir)
+	return m
+}
+
+func TestMatchScopedPatterns(t *testing.T) {
+	m := setupScopedMatcher(t, "", "src", "*.generated.go\ntmp/\n")
 
 	tests := []struct {
 		path string
@@ -192,24 +266,7 @@ func TestMatchScopedMultipleLevels(t *testing.T) {
 }
 
 func TestMatchScopedNestedOverridesParent(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	// Root ignores all .txt files
-	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.txt\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "docs"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	// docs/.gitignore re-includes .txt files under docs/
-	if err := os.WriteFile(filepath.Join(root, "docs", ".gitignore"), []byte("!*.txt\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	m := gitignore.New(root)
-	m.AddFromFile(filepath.Join(root, "docs", ".gitignore"), "docs")
+	m := setupScopedMatcher(t, "*.txt\n", "docs", "!*.txt\n")
 
 	tests := []struct {
 		path string
@@ -717,11 +774,6 @@ func TestMatchAgainstGitCheckIgnore(t *testing.T) {
 // command to verify correctness. Each case creates a git repo, writes a .gitignore,
 // and compares our result with git's.
 func TestMatchVsGitCheckIgnore(t *testing.T) {
-	type checkPath struct {
-		path  string
-		isDir bool
-	}
-
 	tests := []struct {
 		name     string
 		patterns string
@@ -758,66 +810,10 @@ func TestMatchVsGitCheckIgnore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root := t.TempDir()
-
-			// Create a git repo
-			for _, args := range [][]string{
-				{"git", "init", "--initial-branch=main"},
-				{"git", "config", "user.email", "test@test.com"},
-				{"git", "config", "user.name", "Test"},
-				{"git", "config", "commit.gpgsign", "false"},
-			} {
-				cmd := exec.Command(args[0], args[1:]...)
-				cmd.Dir = root
-				if err := cmd.Run(); err != nil {
-					t.Fatalf("git init: %v", err)
-				}
-			}
-
-			// Write .gitignore
-			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(tt.patterns), 0644); err != nil {
-				t.Fatal(err)
-			}
-
-			// Create all necessary files/dirs so git check-ignore works
-			for _, cp := range tt.paths {
-				full := filepath.Join(root, cp.path)
-				if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
-					t.Fatal(err)
-				}
-				if cp.isDir {
-					if err := os.MkdirAll(full, 0755); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if err := os.WriteFile(full, []byte("x"), 0644); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-
-			// Build our matcher
+			root := initGitRepo(t, tt.patterns)
+			createCheckPaths(t, root, tt.paths)
 			m := gitignore.New(root)
-
-			for _, cp := range tt.paths {
-				matchPath := cp.path
-				if cp.isDir {
-					matchPath += "/"
-				}
-
-				ourResult := m.Match(matchPath)
-
-				// Ask git check-ignore
-				cmd := exec.Command("git", "check-ignore", "-q", cp.path)
-				cmd.Dir = root
-				err := cmd.Run()
-				gitResult := err == nil // exit 0 = ignored, exit 1 = not ignored
-
-				if ourResult != gitResult {
-					t.Errorf("path %q: our matcher says ignored=%v, git check-ignore says ignored=%v",
-						cp.path, ourResult, gitResult)
-				}
-			}
+			compareWithGit(t, root, m, tt.paths)
 		})
 	}
 }
@@ -1392,11 +1388,6 @@ func TestMatchBlankLines(t *testing.T) {
 
 // Verify edge cases against git check-ignore
 func TestMatchEdgeCasesVsGitCheckIgnore(t *testing.T) {
-	type checkPath struct {
-		path  string
-		isDir bool
-	}
-
 	tests := []struct {
 		name     string
 		patterns string
@@ -1458,61 +1449,10 @@ func TestMatchEdgeCasesVsGitCheckIgnore(t *testing.T) {
 			if runtime.GOOS == "windows" && tt.name == "escaped wildcards" {
 				t.Skip("Windows does not allow * or ? in filenames")
 			}
-			root := t.TempDir()
-
-			for _, args := range [][]string{
-				{"git", "init", "--initial-branch=main"},
-				{"git", "config", "user.email", "test@test.com"},
-				{"git", "config", "user.name", "Test"},
-				{"git", "config", "commit.gpgsign", "false"},
-			} {
-				cmd := exec.Command(args[0], args[1:]...)
-				cmd.Dir = root
-				if err := cmd.Run(); err != nil {
-					t.Fatalf("git init: %v", err)
-				}
-			}
-
-			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(tt.patterns), 0644); err != nil {
-				t.Fatal(err)
-			}
-
-			for _, cp := range tt.paths {
-				full := filepath.Join(root, cp.path)
-				if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
-					t.Fatal(err)
-				}
-				if cp.isDir {
-					if err := os.MkdirAll(full, 0755); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if err := os.WriteFile(full, []byte("x"), 0644); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-
+			root := initGitRepo(t, tt.patterns)
+			createCheckPaths(t, root, tt.paths)
 			m := gitignore.New(root)
-
-			for _, cp := range tt.paths {
-				matchPath := cp.path
-				if cp.isDir {
-					matchPath += "/"
-				}
-
-				ourResult := m.Match(matchPath)
-
-				cmd := exec.Command("git", "check-ignore", "-q", cp.path)
-				cmd.Dir = root
-				err := cmd.Run()
-				gitResult := err == nil
-
-				if ourResult != gitResult {
-					t.Errorf("path %q: our matcher says ignored=%v, git check-ignore says ignored=%v",
-						cp.path, ourResult, gitResult)
-				}
-			}
+			compareWithGit(t, root, m, tt.paths)
 		})
 	}
 }
@@ -1804,11 +1744,6 @@ func TestWildmatchSlashHandling(t *testing.T) {
 }
 
 func TestWildmatchVsGitCheckIgnore(t *testing.T) {
-	type checkPath struct {
-		path  string
-		isDir bool
-	}
-
 	tests := []struct {
 		name     string
 		patterns string
@@ -1876,61 +1811,10 @@ func TestWildmatchVsGitCheckIgnore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root := t.TempDir()
-
-			for _, args := range [][]string{
-				{"git", "init", "--initial-branch=main"},
-				{"git", "config", "user.email", "test@test.com"},
-				{"git", "config", "user.name", "Test"},
-				{"git", "config", "commit.gpgsign", "false"},
-			} {
-				cmd := exec.Command(args[0], args[1:]...)
-				cmd.Dir = root
-				if err := cmd.Run(); err != nil {
-					t.Fatalf("git init: %v", err)
-				}
-			}
-
-			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(tt.patterns), 0644); err != nil {
-				t.Fatal(err)
-			}
-
-			for _, cp := range tt.paths {
-				full := filepath.Join(root, cp.path)
-				if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
-					t.Fatal(err)
-				}
-				if cp.isDir {
-					if err := os.MkdirAll(full, 0755); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if err := os.WriteFile(full, []byte("x"), 0644); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-
+			root := initGitRepo(t, tt.patterns)
+			createCheckPaths(t, root, tt.paths)
 			m := gitignore.New(root)
-
-			for _, cp := range tt.paths {
-				matchPath := cp.path
-				if cp.isDir {
-					matchPath += "/"
-				}
-
-				ourResult := m.Match(matchPath)
-
-				cmd := exec.Command("git", "check-ignore", "-q", cp.path)
-				cmd.Dir = root
-				err := cmd.Run()
-				gitResult := err == nil
-
-				if ourResult != gitResult {
-					t.Errorf("path %q: our matcher says ignored=%v, git check-ignore says ignored=%v",
-						cp.path, ourResult, gitResult)
-				}
-			}
+			compareWithGit(t, root, m, tt.paths)
 		})
 	}
 }

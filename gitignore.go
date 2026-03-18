@@ -459,17 +459,36 @@ func compilePattern(line, dir string) (pattern, string) {
 		}
 	}
 
-	// Split into segments on '/'.
+	segs, anchored := buildSegments(line, hasLeadingSlash)
+	p.anchored = anchored
+
+	if msg := validateSegmentBrackets(segs); msg != "" {
+		return pattern{}, msg
+	}
+
+	segs = appendTrailingDoubleStar(segs, p.dirOnly)
+
+	p.segments = segs
+	for _, s := range segs {
+		if !s.doubleStar {
+			p.hasConcrete = true
+			break
+		}
+	}
+	p.literalSuffix = extractLiteralSuffix(segs)
+	return p, ""
+}
+
+// buildSegments splits a pattern line into segments, prepends ** for unanchored
+// patterns, and collapses consecutive ** segments.
+func buildSegments(line string, hasLeadingSlash bool) ([]segment, bool) {
 	rawSegs := strings.Split(line, "/")
+	anchored := hasLeadingSlash || len(rawSegs) > 1
 
-	// Determine anchoring: leading slash, or pattern contains a slash.
-	p.anchored = hasLeadingSlash || len(rawSegs) > 1
+	const extraStarSegments = 2
+	segs := make([]segment, 0, len(rawSegs)+extraStarSegments)
 
-	// Build segment list.
-	segs := make([]segment, 0, len(rawSegs)+2)
-
-	// If not anchored, prepend ** so it matches at any directory level.
-	if !p.anchored {
+	if !anchored {
 		segs = append(segs, segment{doubleStar: true})
 	}
 
@@ -481,7 +500,6 @@ func compilePattern(line, dir string) (pattern, string) {
 		}
 	}
 
-	// Collapse consecutive ** segments.
 	collapsed := segs[:1]
 	for i := 1; i < len(segs); i++ {
 		if segs[i].doubleStar && collapsed[len(collapsed)-1].doubleStar {
@@ -489,36 +507,29 @@ func compilePattern(line, dir string) (pattern, string) {
 		}
 		collapsed = append(collapsed, segs[i])
 	}
-	segs = collapsed
+	return collapsed, anchored
+}
 
-	// Validate bracket expressions: check closing ] exists and POSIX class names are valid.
+// validateSegmentBrackets checks bracket expressions in all concrete segments.
+func validateSegmentBrackets(segs []segment) string {
 	for _, seg := range segs {
 		if seg.doubleStar {
 			continue
 		}
 		if msg := validateBrackets(seg.raw); msg != "" {
-			return pattern{}, msg
+			return msg
 		}
 	}
+	return ""
+}
 
-	// Append implicit ** at end for non-dir-only patterns so that matching
-	// "foo" also matches "foo/anything". Dir-only patterns handle descendants
-	// separately in matchPattern.
-	if !p.dirOnly {
-		if len(segs) == 0 || !segs[len(segs)-1].doubleStar {
-			segs = append(segs, segment{doubleStar: true})
-		}
+// appendTrailingDoubleStar adds an implicit ** at the end for non-dir-only
+// patterns so that matching "foo" also matches "foo/anything".
+func appendTrailingDoubleStar(segs []segment, dirOnly bool) []segment {
+	if !dirOnly && (len(segs) == 0 || !segs[len(segs)-1].doubleStar) {
+		segs = append(segs, segment{doubleStar: true})
 	}
-
-	p.segments = segs
-	for _, s := range segs {
-		if !s.doubleStar {
-			p.hasConcrete = true
-			break
-		}
-	}
-	p.literalSuffix = extractLiteralSuffix(segs)
-	return p, ""
+	return segs
 }
 
 // extractLiteralSuffix finds the literal trailing portion of the last concrete
@@ -570,39 +581,50 @@ func validateBrackets(glob string) string {
 		if glob[i] != '[' {
 			continue
 		}
-		// Find the matching close bracket.
-		j := i + 1
-		if j < len(glob) && (glob[j] == '!' || glob[j] == '^') {
-			j++
+		msg, end := validateBracketAt(glob, i)
+		if msg != "" {
+			return msg
 		}
-		if j < len(glob) && glob[j] == ']' {
-			j++ // ] as first char is literal
+		if end >= 0 {
+			i = end
 		}
-		for j < len(glob) && glob[j] != ']' {
-			if glob[j] == '\\' && j+1 < len(glob) {
-				j += 2
-				continue
-			}
-			if glob[j] == '[' && j+1 < len(glob) && glob[j+1] == ':' {
-				end := findPosixClassEnd(glob, j+2)
-				if end >= 0 {
-					name := glob[j+2 : end]
-					if !validPosixClassName(name) {
-						return "unknown POSIX class [:" + name + ":]"
-					}
-					j = end + 2
-					continue
-				}
-			}
-			j++
-		}
-		if j >= len(glob) {
-			// No closing bracket; treat [ as literal (this is fine).
-			continue
-		}
-		i = j // skip to closing ]
 	}
 	return ""
+}
+
+// validateBracketAt validates the bracket expression starting at glob[pos].
+// Returns an error message if invalid, and the index of the closing ']' (or -1
+// if the bracket has no closing ']' and should be treated as literal).
+func validateBracketAt(glob string, pos int) (string, int) {
+	j := pos + 1
+	if j < len(glob) && (glob[j] == '!' || glob[j] == '^') {
+		j++
+	}
+	if j < len(glob) && glob[j] == ']' {
+		j++ // ] as first char is literal
+	}
+	for j < len(glob) && glob[j] != ']' {
+		if glob[j] == '\\' && j+1 < len(glob) {
+			j += posixClassOffset
+			continue
+		}
+		if glob[j] == '[' && j+1 < len(glob) && glob[j+1] == ':' {
+			end := findPosixClassEnd(glob, j+posixClassOffset)
+			if end >= 0 {
+				name := glob[j+posixClassOffset : end]
+				if !validPosixClassName(name) {
+					return "unknown POSIX class [:" + name + ":]", -1
+				}
+				j = end + posixClassOffset
+				continue
+			}
+		}
+		j++
+	}
+	if j >= len(glob) {
+		return "", -1
+	}
+	return "", j
 }
 
 func validPosixClassName(name string) bool {
