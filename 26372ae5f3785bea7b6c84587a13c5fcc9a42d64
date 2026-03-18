@@ -1,0 +1,27 @@
+gitignore_test.go
+  c47bb06091847654 16,19-26,29-39,41,44-85,168-170,175,178-179,181-186,189,193-198,269,813-814,816,1452-1453,1455,1814-1815,1817
+gitignore.go
+  c47bb06091847654 462-469,471-472,477-480,482-486,488-489,510-511,513-514,523-524,526-529,532,584-586,588-589,591-605,608,612,614,616,618-619,622,624-627
+wildmatch.go
+  c47bb06091847654 3-6,141-143,146,148,151-160,164-182,196-198,200-208,211-212,214-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "26372ae5f3785bea7b6c84587a13c5fcc9a42d64",
+  "prompts": {
+    "c47bb06091847654": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b97daf07-75b2-4f76-a875-ad3f9e044a10",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Andrew Nesbitt <andrewnez@gmail.com>",
+      "messages": [],
+      "total_additions": 259,
+      "total_deletions": 356,
+      "accepted_lines": 234,
+      "overriden_lines": 0
+    }
+  }
+}
