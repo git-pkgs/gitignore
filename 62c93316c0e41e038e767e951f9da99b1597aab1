@@ -1,0 +1,25 @@
+gitignore.go
+  1327dc58b06a9ef3 21,469-475,548-552,554-555,557-559,637
+gitignore_test.go
+  1327dc58b06a9ef3 620-709,1368-1369,1376,1386-1389
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.19",
+  "base_commit_sha": "62c93316c0e41e038e767e951f9da99b1597aab1",
+  "prompts": {
+    "1327dc58b06a9ef3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3f57f29b-9d0b-4ee5-a84d-a8257701ac5a",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 116,
+      "overriden_lines": 0
+    }
+  }
+}
