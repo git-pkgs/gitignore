@@ -1,0 +1,25 @@
+gitignore_test.go
+  1327dc58b06a9ef3 620-644
+gitignore.go
+  1327dc58b06a9ef3 539-543,545-546,548-550
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.19",
+  "base_commit_sha": "568f5768b35a80d08684a5aabf32dc3395a3ab52",
+  "prompts": {
+    "1327dc58b06a9ef3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3f57f29b-9d0b-4ee5-a84d-a8257701ac5a",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Andrew Nesbitt <andrewnez@gmail.com>",
+      "messages": [],
+      "total_additions": 35,
+      "total_deletions": 7,
+      "accepted_lines": 35,
+      "overriden_lines": 0
+    }
+  }
+}
