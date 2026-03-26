@@ -18,7 +18,7 @@ type segment struct {
 type pattern struct {
 	segments      []segment
 	negate        bool
-	dirOnly       bool   // trailing slash pattern
+	dirOnly       bool   // trailing slash pattern or trailing /** pattern
 	hasConcrete   bool   // has at least one non-** segment
 	anchored      bool
 	prefix        string // directory scope for nested .gitignore
@@ -466,6 +466,15 @@ func compilePattern(line, dir string) (pattern, string) {
 		return pattern{}, msg
 	}
 
+	// Trailing /** means "match directory and its contents, not files with the
+	// same name". In git, "data/**" matches data/ and data/file but not data
+	// (as a file). This is equivalent to dirOnly semantics, so strip the
+	// trailing ** and set dirOnly.
+	if !p.dirOnly && len(segs) >= 2 && segs[len(segs)-1].doubleStar {
+		segs = segs[:len(segs)-1]
+		p.dirOnly = true
+	}
+
 	segs = appendTrailingDoubleStar(segs, p.dirOnly)
 
 	p.segments = segs
@@ -536,15 +545,18 @@ func appendTrailingDoubleStar(segs []segment, dirOnly bool) []segment {
 // segment, for fast rejection. For example, "*.log" yields ".log", "test_*.go"
 // yields ".go". Only extracts a suffix when the segment is a simple star-prefix
 // glob with no brackets, escapes, or question marks in the suffix portion.
+//
+// The suffix is only extracted when the last segment is concrete (not **),
+// because the fast-reject check compares against the final path segment.
+// When the pattern ends with **, the concrete segment could match any path
+// segment, making a last-segment-only check incorrect.
 func extractLiteralSuffix(segs []segment) string {
-	// Find the last non-** segment.
-	var last string
-	for i := len(segs) - 1; i >= 0; i-- {
-		if !segs[i].doubleStar {
-			last = segs[i].raw
-			break
-		}
+	if len(segs) == 0 || segs[len(segs)-1].doubleStar {
+		return ""
 	}
+
+	// The last segment is concrete; use it for suffix extraction.
+	last := segs[len(segs)-1].raw
 	if last == "" {
 		return ""
 	}
@@ -622,7 +634,7 @@ func validateBracketAt(glob string, pos int) (string, int) {
 		j++
 	}
 	if j >= len(glob) {
-		return "", -1
+		return "unclosed bracket expression", -1
 	}
 	return "", j
 }
