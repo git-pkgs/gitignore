@@ -617,6 +617,96 @@ func TestMatchWildcardStar(t *testing.T) {
 	}
 }
 
+func TestMatchWildcardInTheMiddle(t *testing.T) {
+	m := setupMatcher(t, "v*o\n")
+
+	shouldMatch := []string{
+		"vulkano",
+		"value/vulkano/tail",
+		"voo",
+	}
+	shouldNotMatch := []string{
+		"value",
+		"tail",
+	}
+
+	for _, path := range shouldMatch {
+		if !m.Match(path) {
+			t.Errorf("expected %q to match", path)
+		}
+	}
+	for _, path := range shouldNotMatch {
+		if m.Match(path) {
+			t.Errorf("expected %q to not match", path)
+		}
+	}
+}
+
+func TestMatchMalformedBracketRejectsPattern(t *testing.T) {
+	m := setupMatcher(t, "v[ou]l[\n")
+
+	// Git rejects patterns with unclosed bracket expressions.
+	// The pattern should be treated as invalid and match nothing.
+	if m.Match("vol[") {
+		t.Error("expected vol[ to not match - unclosed bracket should reject pattern")
+	}
+	if m.Match("vol") {
+		t.Error("expected vol to not match - unclosed bracket should reject pattern")
+	}
+
+	errs := m.Errors()
+	if len(errs) == 0 {
+		t.Error("expected pattern compilation error for unclosed bracket")
+	}
+}
+
+func TestMatchTrailingDoubleStarMatchesOnlyContents(t *testing.T) {
+	m := setupMatcher(t, "/a*/**\n")
+
+	shouldMatch := []string{
+		"ab_dir/file",
+		"abc/deep/nested/file",
+	}
+	shouldNotMatch := []string{
+		"ab",
+		"abc",
+	}
+
+	for _, path := range shouldMatch {
+		if !m.Match(path) {
+			t.Errorf("expected %q to match", path)
+		}
+	}
+	for _, path := range shouldNotMatch {
+		if m.Match(path) {
+			t.Errorf("expected %q to not match", path)
+		}
+	}
+}
+
+func TestMatchDirectoryNegationWithDoubleStarSlash(t *testing.T) {
+	m := setupMatcher(t, "data/**\n!data/**/\n")
+
+	cases := []struct {
+		path   string
+		expect bool
+	}{
+		{"data/", false},
+		{"data/data1/", false},
+		{"data/file.txt", true},
+		{"data/data1/file.txt", true},
+		{"data/data1/data2/", false},
+		{"data/data1/data2/file.txt", true},
+	}
+
+	for _, tc := range cases {
+		got := m.Match(tc.path)
+		if got != tc.expect {
+			t.Errorf("Match(%q) = %v, want %v", tc.path, got, tc.expect)
+		}
+	}
+}
+
 func TestMatchQuestionMark(t *testing.T) {
 	m := setupMatcher(t, "dea?beef\n")
 
@@ -1275,14 +1365,15 @@ func TestMatchBracketNegationCaret(t *testing.T) {
 }
 
 func TestMatchUnclosedBracket(t *testing.T) {
-	// An unclosed [ is treated as a literal character
+	// Git rejects patterns with unclosed bracket expressions.
+	// The pattern should be treated as invalid and match nothing.
 	m := setupMatcher(t, "file[.txt\n")
 
 	tests := []struct {
 		path string
 		want bool
 	}{
-		{"file[.txt", true},
+		{"file[.txt", false},
 		{"filea.txt", false},
 	}
 
@@ -1291,6 +1382,11 @@ func TestMatchUnclosedBracket(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("Match(%q) = %v, want %v", tt.path, got, tt.want)
 		}
+	}
+
+	errs := m.Errors()
+	if len(errs) == 0 {
+		t.Error("expected pattern compilation error for unclosed bracket")
 	}
 }
 
