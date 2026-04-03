@@ -2490,3 +2490,36 @@ func TestAddPatterns(t *testing.T) {
 		}
 	}
 }
+
+func TestNewEmptyRootSkipsFilesystem(t *testing.T) {
+	// Create a temporary directory with a .gitignore that excludes *.exe
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.exe\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change to that directory so CWD has a .gitignore
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(orig); err != nil {
+			t.Logf("failed to restore working directory: %v", err)
+		}
+	})
+
+	// New("") should not load any filesystem patterns
+	m := gitignore.New("")
+	m.AddPatterns([]byte("*.tmp"), "")
+
+	if m.MatchPath("test.exe", false) {
+		t.Error("New(\"\") should not load .gitignore from CWD, but *.exe matched")
+	}
+	if !m.MatchPath("test.tmp", false) {
+		t.Error("AddPatterns(*.tmp) should still work after New(\"\")")
+	}
+}
