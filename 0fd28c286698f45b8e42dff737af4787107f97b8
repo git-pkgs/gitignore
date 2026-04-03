@@ -1,0 +1,27 @@
+README.md
+  f8367eb0c618022f 36-43
+gitignore.go
+  f8367eb0c618022f 92-94,98-100
+gitignore_test.go
+  f8367eb0c618022f 2493-2525
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.5",
+  "base_commit_sha": "0fd28c286698f45b8e42dff737af4787107f97b8",
+  "prompts": {
+    "f8367eb0c618022f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aa66949b-bec5-4893-961f-0c7933d78f6d",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Andrew Nesbitt",
+      "messages": [],
+      "total_additions": 49,
+      "total_deletions": 3,
+      "accepted_lines": 48,
+      "overriden_lines": 0
+    }
+  }
+}
