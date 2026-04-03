@@ -33,7 +33,14 @@ For repos with nested `.gitignore` files, `NewFromDirectory` walks the tree and 
 m := gitignore.NewFromDirectory("/path/to/repo")
 ```
 
-You can also add patterns manually:
+To create a matcher with only programmatic patterns (no filesystem loading), pass an empty root:
+
+```go
+m := gitignore.New("")
+m.AddPatterns([]byte("*.tmp\n"), "")
+```
+
+You can also add patterns to any matcher manually:
 
 ```go
 m.AddFromFile("/path/to/repo/src/.gitignore", "src")

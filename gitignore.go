@@ -89,9 +89,15 @@ func (m *Matcher) Errors() []PatternError {
 // patterns override earlier ones.
 //
 // The root parameter should be the repository working directory
-// (containing .git/).
+// (containing .git/). If root is empty, no filesystem patterns are
+// loaded and the returned Matcher is empty. Use AddPatterns or
+// AddFromFile to add patterns programmatically.
 func New(root string) *Matcher {
 	m := &Matcher{}
+
+	if root == "" {
+		return m
+	}
 
 	// Read global excludes (lowest priority)
 	if gef := globalExcludesFile(); gef != "" {
