@@ -196,35 +196,43 @@ func Walk(root string, fn func(path string, d fs.DirEntry) error) error {
 // walk begins. Any .gitignore files between root and start are loaded
 // before the walk begins, so their patterns apply correctly.
 //
-// The start parameter is a slash-separated path relative to root (e.g.
-// "src/pkg"). Paths passed to fn are relative to root (not to start)
-// and use the OS path separator. The start directory itself is passed
-// to fn.
+// The start parameter is a path relative to root (e.g. "src/pkg"),
+// using either forward slashes or the OS path separator. Paths passed
+// to fn are relative to root (not to start) and use the OS path
+// separator. The start directory itself is passed to fn.
 func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) error {
 	if start == "" || start == "." {
 		return Walk(root, fn)
 	}
 
-	start = filepath.ToSlash(filepath.Clean(start))
+	start = filepath.Clean(start)
 
 	m := New(root)
 
-	parts := strings.Split(start, "/")
-	for i := range parts {
-		prefix := strings.Join(parts[:i+1], "/")
-		igPath := filepath.Join(root, filepath.FromSlash(prefix), ".gitignore")
+	{
+		slashed := filepath.ToSlash(start)
+		for i := 0; i < len(slashed); i++ {
+			if slashed[i] == '/' {
+				prefix := slashed[:i]
+				igPath := filepath.Join(root, prefix, ".gitignore")
+				if _, err := os.Stat(igPath); err == nil {
+					m.AddFromFile(igPath, prefix)
+				}
+			}
+		}
+		igPath := filepath.Join(root, start, ".gitignore")
 		if _, err := os.Stat(igPath); err == nil {
-			m.AddFromFile(igPath, prefix)
+			m.AddFromFile(igPath, slashed)
 		}
 	}
 
-	startAbs := filepath.Join(root, filepath.FromSlash(start))
-	info, err := os.Stat(startAbs)
+	startDir := filepath.Join(root, start)
+	info, err := os.Stat(startDir)
 	if err != nil {
 		return err
 	}
 
-	startRel := filepath.FromSlash(start)
+	startRel := start
 	if fn != nil {
 		if err := fn(startRel, fs.FileInfoToDirEntry(info)); err != nil {
 			return err
