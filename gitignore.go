@@ -219,10 +219,7 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) err
 				break
 			}
 			prefix := slashed[:off+i]
-			igPath := filepath.Join(root, prefix, ".gitignore")
-			if _, err := os.Stat(igPath); err == nil {
-				m.AddFromFile(igPath, prefix)
-			}
+			m.AddFromFile(filepath.Join(root, prefix, ".gitignore"), prefix)
 			off += i + 1
 		}
 	}
