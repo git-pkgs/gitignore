@@ -211,18 +211,21 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) err
 
 	{
 		slashed := filepath.ToSlash(start)
-		for i := 0; i < len(slashed); i++ {
-			if slashed[i] == '/' {
-				prefix := slashed[:i]
-				igPath := filepath.Join(root, prefix, ".gitignore")
+		for off := 0; ; {
+			i := strings.IndexByte(slashed[off:], '/')
+			if i == -1 {
+				igPath := filepath.Join(root, start, ".gitignore")
 				if _, err := os.Stat(igPath); err == nil {
-					m.AddFromFile(igPath, prefix)
+					m.AddFromFile(igPath, slashed)
 				}
+				break
 			}
-		}
-		igPath := filepath.Join(root, start, ".gitignore")
-		if _, err := os.Stat(igPath); err == nil {
-			m.AddFromFile(igPath, slashed)
+			prefix := slashed[:off+i]
+			igPath := filepath.Join(root, prefix, ".gitignore")
+			if _, err := os.Stat(igPath); err == nil {
+				m.AddFromFile(igPath, prefix)
+			}
+			off += i + 1
 		}
 	}
 
@@ -232,14 +235,13 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) err
 		return err
 	}
 
-	startRel := start
 	if fn != nil {
-		if err := fn(startRel, fs.FileInfoToDirEntry(info)); err != nil {
+		if err := fn(start, fs.FileInfoToDirEntry(info)); err != nil {
 			return err
 		}
 	}
 
-	return walkRecursive(root, startRel, m, fn)
+	return walkRecursive(root, start, m, fn)
 }
 
 func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) error) error {
