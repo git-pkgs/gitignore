@@ -2638,6 +2638,42 @@ func TestWalkFromLoadsIntermediateGitignore(t *testing.T) {
 	}
 }
 
+func TestWalkFromLoadsStartDirGitignore(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "src", "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "pkg", ".gitignore"), []byte("*.out\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"src/pkg/lib.go", "src/pkg/build.out"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := make(map[string]bool)
+	err := gitignore.WalkFrom(root, "src/pkg", func(path string, d os.DirEntry) error {
+		got[filepath.ToSlash(path)] = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !got["src/pkg/lib.go"] {
+		t.Error("WalkFrom should yield src/pkg/lib.go")
+	}
+	if got["src/pkg/build.out"] {
+		t.Error("WalkFrom should not yield src/pkg/build.out (ignored by src/pkg/.gitignore)")
+	}
+}
+
 func TestWalkFromLoadsGitInfoExclude(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 

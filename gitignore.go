@@ -209,15 +209,13 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) err
 
 	m := New(root)
 
+	// Load .gitignore from each ancestor directory between root and start
+	// (exclusive of start itself, which walkRecursive loads).
 	{
 		slashed := filepath.ToSlash(start)
 		for off := 0; ; {
 			i := strings.IndexByte(slashed[off:], '/')
 			if i == -1 {
-				igPath := filepath.Join(root, start, ".gitignore")
-				if _, err := os.Stat(igPath); err == nil {
-					m.AddFromFile(igPath, slashed)
-				}
 				break
 			}
 			prefix := slashed[:off+i]
