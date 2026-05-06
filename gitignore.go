@@ -197,10 +197,7 @@ func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) er
 
 	// Load .gitignore for this directory before processing entries.
 	if rel != "" {
-		igPath := filepath.Join(dir, ".gitignore")
-		if _, err := os.Stat(igPath); err == nil {
-			m.AddFromFile(igPath, filepath.ToSlash(rel))
-		}
+		m.AddFromFile(filepath.Join(dir, ".gitignore"), filepath.ToSlash(rel))
 	}
 
 	entries, err := os.ReadDir(dir)
