@@ -2721,41 +2721,45 @@ func TestWalkFromLoadsGitInfoExclude(t *testing.T) {
 	}
 }
 
-func TestWalkFromEmptyStart(t *testing.T) {
-	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+func TestWalkFromRootEquivalentStart(t *testing.T) {
+	for _, start := range []string{"", ".", "./", "./."} {
+		t.Run("start="+start, func(t *testing.T) {
+			t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("x"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "trace.log"), []byte("x"), 0644); err != nil {
-		t.Fatal(err)
-	}
+			root := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "trace.log"), []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
 
-	var collected []string
-	err := gitignore.WalkFrom(root, "", func(path string, d os.DirEntry) error {
-		collected = append(collected, filepath.ToSlash(path))
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+			var collected []string
+			err := gitignore.WalkFrom(root, start, func(path string, d os.DirEntry) error {
+				collected = append(collected, filepath.ToSlash(path))
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	got := make(map[string]bool)
-	for _, p := range collected {
-		got[p] = true
-	}
+			got := make(map[string]bool)
+			for _, p := range collected {
+				got[p] = true
+			}
 
-	if !got["file.txt"] {
-		t.Error("WalkFrom with empty start should yield file.txt")
-	}
-	if got["trace.log"] {
-		t.Error("WalkFrom with empty start should not yield trace.log")
+			if !got["file.txt"] {
+				t.Errorf("WalkFrom(start=%q) should yield file.txt", start)
+			}
+			if got["trace.log"] {
+				t.Errorf("WalkFrom(start=%q) should not yield trace.log", start)
+			}
+		})
 	}
 }

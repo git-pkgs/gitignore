@@ -206,6 +206,9 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) err
 	}
 
 	start = filepath.Clean(start)
+	if start == "." {
+		return Walk(root, fn)
+	}
 
 	m := New(root)
 
