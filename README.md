@@ -76,6 +76,15 @@ gitignore.Walk("/path/to/repo", func(path string, d fs.DirEntry) error {
 })
 ```
 
+`WalkFrom` walks a subdirectory while still respecting root-level rules. It loads global excludes, `.git/info/exclude`, the root `.gitignore`, and every `.gitignore` between the root and the start directory before walking, so patterns scoped above the start still apply. Paths passed to `fn` are relative to the root.
+
+```go
+gitignore.WalkFrom("/path/to/repo", "src/pkg", func(path string, d fs.DirEntry) error {
+    fmt.Println(path) // e.g. "src/pkg/lib.go"
+    return nil
+})
+```
+
 ## Error handling
 
 Invalid patterns (like unknown POSIX character classes) are silently skipped during matching. To inspect them:
