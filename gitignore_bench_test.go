@@ -111,3 +111,46 @@ func BenchmarkMatchDeepPath(b *testing.B) {
 		m.Match("a/b/c/d/e/f/g/file.txt")
 	}
 }
+
+func BenchmarkMatchNestedPatterns(b *testing.B) {
+	m := benchMatcher(b, realisticPatterns())
+	for _, dir := range []string{"src", "src/pkg", "src/pkg/internal", "src/pkg/internal/util"} {
+		m.AddPatterns([]byte("*.gen.go\nlocal/\n*.tmp\n"), dir)
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		m.Match("src/pkg/internal/util/main.go")
+	}
+}
+
+func BenchmarkWalk(b *testing.B) {
+	b.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+
+	root := b.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		b.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(realisticPatterns()), 0644); err != nil {
+		b.Fatal(err)
+	}
+	for i := range 10 {
+		dir := filepath.Join(root, fmt.Sprintf("d%d", i))
+		for j := range 5 {
+			sub := filepath.Join(dir, fmt.Sprintf("s%d", j))
+			if err := os.MkdirAll(sub, 0755); err != nil {
+				b.Fatal(err)
+			}
+			for _, name := range []string{"a.go", "b.go", "c.log", "d.tmp"} {
+				if err := os.WriteFile(filepath.Join(sub, name), []byte("x"), 0644); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		_ = gitignore.Walk(root, func(path string, d os.DirEntry) error {
+			return nil
+		})
+	}
+}

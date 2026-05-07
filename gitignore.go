@@ -18,14 +18,14 @@ type segment struct {
 type pattern struct {
 	segments      []segment
 	negate        bool
-	dirOnly       bool   // trailing slash pattern or trailing /** pattern
-	hasConcrete   bool   // has at least one non-** segment
+	dirOnly       bool // trailing slash pattern or trailing /** pattern
+	hasConcrete   bool // has at least one non-** segment
 	anchored      bool
-	prefix        string // directory scope for nested .gitignore
-	text          string // original pattern text before compilation
-	source        string // file path this pattern came from, empty for programmatic
-	line          int    // 1-based line number in source file
-	literalSuffix string // fast-reject: last segment must end with this (e.g. ".log" from "*.log")
+	prefix        []string // directory scope segments for nested .gitignore
+	text          string   // original pattern text before compilation
+	source        string   // file path this pattern came from, empty for programmatic
+	line          int      // 1-based line number in source file
+	literalSuffix string   // fast-reject: last segment must end with this (e.g. ".log" from "*.log")
 }
 
 // Matcher checks paths against gitignore rules collected from .gitignore files,
@@ -197,10 +197,7 @@ func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) er
 
 	// Load .gitignore for this directory before processing entries.
 	if rel != "" {
-		igPath := filepath.Join(dir, ".gitignore")
-		if _, err := os.Stat(igPath); err == nil {
-			m.AddFromFile(igPath, filepath.ToSlash(rel))
-		}
+		m.AddFromFile(filepath.Join(dir, ".gitignore"), filepath.ToSlash(rel))
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -220,12 +217,8 @@ func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) er
 		if rel != "" {
 			entryRel = filepath.Join(rel, name)
 		}
-		matchPath := filepath.ToSlash(entryRel)
-		if entry.IsDir() {
-			matchPath += "/"
-		}
 
-		if m.Match(matchPath) {
+		if m.MatchPath(filepath.ToSlash(entryRel), entry.IsDir()) {
 			continue
 		}
 
@@ -349,17 +342,16 @@ func (m *Matcher) matchDetail(relPath string, isDir bool) MatchResult {
 // including the directory prefix scope and dirOnly handling.
 func matchPattern(p *pattern, pathSegs []string, isDir bool) bool {
 	segs := pathSegs
-	if p.prefix != "" {
-		prefixSegs := strings.Split(p.prefix, "/")
-		if len(segs) < len(prefixSegs) {
+	if n := len(p.prefix); n > 0 {
+		if len(segs) < n {
 			return false
 		}
-		for i, ps := range prefixSegs {
+		for i, ps := range p.prefix {
 			if segs[i] != ps {
 				return false
 			}
 		}
-		segs = segs[len(prefixSegs):]
+		segs = segs[n:]
 	}
 
 	if p.dirOnly {
@@ -433,7 +425,10 @@ func trimTrailingSpaces(s string) string {
 // Returns the compiled pattern and an empty string on success, or a zero
 // pattern and an error message on failure.
 func compilePattern(line, dir string) (pattern, string) {
-	p := pattern{prefix: dir}
+	var p pattern
+	if dir != "" {
+		p.prefix = strings.Split(dir, "/")
+	}
 
 	// Handle negation
 	if strings.HasPrefix(line, "!") {
