@@ -342,8 +342,8 @@ func (m *Matcher) matchDetail(relPath string, isDir bool) MatchResult {
 // including the directory prefix scope and dirOnly handling.
 func matchPattern(p *pattern, pathSegs []string, isDir bool) bool {
 	segs := pathSegs
-	if len(p.prefix) > 0 {
-		if len(segs) < len(p.prefix) {
+	if n := len(p.prefix); n > 0 {
+		if len(segs) < n {
 			return false
 		}
 		for i, ps := range p.prefix {
@@ -351,7 +351,7 @@ func matchPattern(p *pattern, pathSegs []string, isDir bool) bool {
 				return false
 			}
 		}
-		segs = segs[len(p.prefix):]
+		segs = segs[n:]
 	}
 
 	if p.dirOnly {
