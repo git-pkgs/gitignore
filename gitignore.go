@@ -189,6 +189,59 @@ func Walk(root string, fn func(path string, d fs.DirEntry) error) error {
 	return walkRecursive(root, "", m, fn)
 }
 
+// WalkFrom walks the directory tree starting at a subdirectory of root,
+// calling fn for each file and directory that is not ignored by gitignore
+// rules. Unlike Walk, it separates the repository root (used to find
+// .git/info/exclude and the root .gitignore) from the directory where the
+// walk begins. Any .gitignore files between root and start are loaded
+// before the walk begins, so their patterns apply correctly.
+//
+// The start parameter is a path relative to root (e.g. "src/pkg"),
+// using either forward slashes or the OS path separator. Paths passed
+// to fn are relative to root (not to start) and use the OS path
+// separator. The start directory itself is passed to fn.
+func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) error {
+	if start == "" || start == "." {
+		return Walk(root, fn)
+	}
+
+	start = filepath.Clean(start)
+	if start == "." {
+		return Walk(root, fn)
+	}
+
+	m := New(root)
+
+	// Load .gitignore from each ancestor directory between root and start
+	// (exclusive of start itself, which walkRecursive loads).
+	{
+		slashed := filepath.ToSlash(start)
+		for off := 0; ; {
+			i := strings.IndexByte(slashed[off:], '/')
+			if i == -1 {
+				break
+			}
+			prefix := slashed[:off+i]
+			m.AddFromFile(filepath.Join(root, prefix, ".gitignore"), prefix)
+			off += i + 1
+		}
+	}
+
+	startDir := filepath.Join(root, start)
+	info, err := os.Stat(startDir)
+	if err != nil {
+		return err
+	}
+
+	if fn != nil {
+		if err := fn(start, fs.FileInfoToDirEntry(info)); err != nil {
+			return err
+		}
+	}
+
+	return walkRecursive(root, start, m, fn)
+}
+
 func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) error) error {
 	dir := root
 	if rel != "" {

@@ -2523,3 +2523,243 @@ func TestNewEmptyRootSkipsFilesystem(t *testing.T) {
 		t.Error("AddPatterns(*.tmp) should still work after New(\"\")")
 	}
 }
+
+func TestWalkFrom(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, dir := range []string{"src", "src/pkg", "src/pkg/internal", "docs"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{
+		"README.md",
+		"src/main.go",
+		"src/debug.log",
+		"src/pkg/lib.go",
+		"src/pkg/internal/helper.go",
+		"src/pkg/internal/trace.log",
+		"docs/guide.md",
+	} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var collected []string
+	err := gitignore.WalkFrom(root, "src/pkg", func(path string, d os.DirEntry) error {
+		collected = append(collected, filepath.ToSlash(path))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(map[string]bool)
+	for _, p := range collected {
+		got[p] = true
+	}
+
+	for _, want := range []string{
+		"src/pkg",
+		"src/pkg/lib.go",
+		"src/pkg/internal",
+		"src/pkg/internal/helper.go",
+	} {
+		if !got[want] {
+			t.Errorf("WalkFrom missing expected path %q", want)
+		}
+	}
+	for _, noWant := range []string{
+		"README.md",
+		"src/main.go",
+		"docs/guide.md",
+		"src/pkg/internal/trace.log",
+		"src/debug.log",
+	} {
+		if got[noWant] {
+			t.Errorf("WalkFrom should not yield %q", noWant)
+		}
+	}
+}
+
+func TestWalkFromLoadsIntermediateGitignore(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, dir := range []string{"src", "src/pkg"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", ".gitignore"), []byte("*.tmp\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"src/pkg/lib.go", "src/pkg/cache.tmp"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var collected []string
+	err := gitignore.WalkFrom(root, "src/pkg", func(path string, d os.DirEntry) error {
+		collected = append(collected, filepath.ToSlash(path))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(map[string]bool)
+	for _, p := range collected {
+		got[p] = true
+	}
+
+	if !got["src/pkg/lib.go"] {
+		t.Error("WalkFrom should yield src/pkg/lib.go")
+	}
+	if got["src/pkg/cache.tmp"] {
+		t.Error("WalkFrom should not yield src/pkg/cache.tmp (ignored by src/.gitignore)")
+	}
+}
+
+func TestWalkFromLoadsStartDirGitignore(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "src", "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "pkg", ".gitignore"), []byte("*.out\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"src/pkg/lib.go", "src/pkg/build.out"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := make(map[string]bool)
+	err := gitignore.WalkFrom(root, "src/pkg", func(path string, d os.DirEntry) error {
+		got[filepath.ToSlash(path)] = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !got["src/pkg/lib.go"] {
+		t.Error("WalkFrom should yield src/pkg/lib.go")
+	}
+	if got["src/pkg/build.out"] {
+		t.Error("WalkFrom should not yield src/pkg/build.out (ignored by src/pkg/.gitignore)")
+	}
+}
+
+func TestWalkFromLoadsGitInfoExclude(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "info", "exclude"), []byte("secret\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, dir := range []string{"sub"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"sub/visible.txt", "sub/secret"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var collected []string
+	err := gitignore.WalkFrom(root, "sub", func(path string, d os.DirEntry) error {
+		collected = append(collected, filepath.ToSlash(path))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(map[string]bool)
+	for _, p := range collected {
+		got[p] = true
+	}
+
+	if !got["sub/visible.txt"] {
+		t.Error("WalkFrom should yield sub/visible.txt")
+	}
+	if got["sub/secret"] {
+		t.Error("WalkFrom should not yield sub/secret (ignored by .git/info/exclude)")
+	}
+}
+
+func TestWalkFromRootEquivalentStart(t *testing.T) {
+	for _, start := range []string{"", ".", "./", "./."} {
+		t.Run("start="+start, func(t *testing.T) {
+			t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+
+			root := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(root, ".git", "info"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "trace.log"), []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var collected []string
+			err := gitignore.WalkFrom(root, start, func(path string, d os.DirEntry) error {
+				collected = append(collected, filepath.ToSlash(path))
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := make(map[string]bool)
+			for _, p := range collected {
+				got[p] = true
+			}
+
+			if !got["file.txt"] {
+				t.Errorf("WalkFrom(start=%q) should yield file.txt", start)
+			}
+			if got["trace.log"] {
+				t.Errorf("WalkFrom(start=%q) should not yield trace.log", start)
+			}
+		})
+	}
+}
