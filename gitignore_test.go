@@ -803,7 +803,7 @@ func TestMatchAgainstGitCheckIgnore(t *testing.T) {
 			patterns: "/*\n!src/\n!README.md\n",
 			paths:    []string{"random.txt", "src", "README.md", "other"},
 			wantFile: []bool{true, true, false, true},  // src as file stays ignored (!src/ is dir-only)
-			wantDir:  []bool{true, false, false, true},  // src as dir is re-included by !src/
+			wantDir:  []bool{true, false, false, true}, // src as dir is re-included by !src/
 		},
 		{
 			name:     "anchored vs unanchored",
@@ -1398,8 +1398,8 @@ func TestMatchTrailingSpacesStripped(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"hello", true},    // trailing spaces stripped, matches "hello"
-		{"hello ", false},  // the pattern is "hello", not "hello "
+		{"hello", true},   // trailing spaces stripped, matches "hello"
+		{"hello ", false}, // the pattern is "hello", not "hello "
 		{"hello   ", false},
 	}
 
@@ -1641,18 +1641,18 @@ func TestWildmatchBracketEdgeCases(t *testing.T) {
 		{"[!]-]", "]", false},
 
 		// Backslash escapes inside brackets (wildmatch: \X = literal X)
-		{"[\\-_]", "-", true},          // \- = literal dash
+		{"[\\-_]", "-", true}, // \- = literal dash
 		{"[\\-_]", "_", true},
 		{"[\\-_]", "a", false},
-		{"[\\]]", "]", true},           // \] = literal ]
-		{"[\\\\]", "\\", true},         // \\ = literal backslash
-		{"[!\\\\]", "\\", false},       // negated literal backslash
+		{"[\\]]", "]", true},     // \] = literal ]
+		{"[\\\\]", "\\", true},   // \\ = literal backslash
+		{"[!\\\\]", "\\", false}, // negated literal backslash
 		{"[!\\\\]", "a", true},
-		{"[A-\\\\]", "G", true},        // range A(65) to \(92)
+		{"[A-\\\\]", "G", true}, // range A(65) to \(92)
 
 		// Range with \\ as endpoint: range \(92) to ^(94)
-		{"[\\\\-^]", "]", true},        // ](93) is in range
-		{"[\\\\-^]", "[", false},       // [(91) is not
+		{"[\\\\-^]", "]", true},  // ](93) is in range
+		{"[\\\\-^]", "[", false}, // [(91) is not
 
 		// Range via escaped endpoints: \1=1, \3=3, range 1-3
 		{"[\\1-\\3]", "2", true},
@@ -1660,10 +1660,10 @@ func TestWildmatchBracketEdgeCases(t *testing.T) {
 		{"[\\1-\\3]", "4", false},
 
 		// Range from [ to ] via escaped ]: [(91) to ](93)
-		{"[[-\\]]", "\\", true},        // \(92) in range
-		{"[[-\\]]", "[", true},         // [(91) in range
-		{"[[-\\]]", "]", true},         // ](93) in range
-		{"[[-\\]]", "-", false},        // -(45) not in range
+		{"[[-\\]]", "\\", true}, // \(92) in range
+		{"[[-\\]]", "[", true},  // [(91) in range
+		{"[[-\\]]", "]", true},  // ](93) in range
+		{"[[-\\]]", "-", false}, // -(45) not in range
 
 		// Various dash/range positions
 		{"[-]", "-", true},
@@ -1673,9 +1673,9 @@ func TestWildmatchBracketEdgeCases(t *testing.T) {
 
 		// Comma in bracket
 		{"[,]", ",", true},
-		{"[\\\\,]", ",", true},         // \\=literal backslash, comma=literal
+		{"[\\\\,]", ",", true}, // \\=literal backslash, comma=literal
 		{"[\\\\,]", "\\", true},
-		{"[\\,]", ",", true},           // \,=literal comma
+		{"[\\,]", ",", true}, // \,=literal comma
 
 		// Caret as literal in bracket (not at start)
 		{"[a^bc]", "^", true},
@@ -2057,12 +2057,12 @@ func TestNewFromDirectory(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"app.log", true},          // root pattern
-		{"src/app.log", true},      // root pattern applies in subdirs
-		{"src/cache.tmp", true},    // src/.gitignore pattern
-		{"cache.tmp", false},       // src pattern scoped to src/
+		{"app.log", true},            // root pattern
+		{"src/app.log", true},        // root pattern applies in subdirs
+		{"src/cache.tmp", true},      // src/.gitignore pattern
+		{"cache.tmp", false},         // src pattern scoped to src/
 		{"src/lib/foo.gen.go", true}, // src/lib/.gitignore pattern
-		{"src/foo.gen.go", false},  // lib pattern scoped to src/lib/
+		{"src/foo.gen.go", false},    // lib pattern scoped to src/lib/
 		{"src/main.go", false},
 	}
 
@@ -2083,7 +2083,7 @@ func TestMatchPath(t *testing.T) {
 		want  bool
 	}{
 		{"vendor", true, true},
-		{"vendor", false, false},       // dir-only pattern, file doesn't match
+		{"vendor", false, false}, // dir-only pattern, file doesn't match
 		{"app.log", false, true},
 		{"logs/app.log", false, true},
 		{"build", false, true},
@@ -2197,20 +2197,20 @@ func TestWalk(t *testing.T) {
 
 	// Should include non-ignored files and directories
 	want := map[string]bool{
-		".gitignore":       true,
-		"README.md":        true,
-		"src":              true,
-		"src/main.go":      true,
-		"src/nested":       true,
+		".gitignore":         true,
+		"README.md":          true,
+		"src":                true,
+		"src/main.go":        true,
+		"src/nested":         true,
 		"src/nested/util.go": true,
 	}
 
 	// Should NOT include
 	noWant := map[string]bool{
-		"build":          true,
+		"build":           true,
 		"build/output.js": true,
-		"src/debug.log":  true,
-		".git":           true,
+		"src/debug.log":   true,
+		".git":            true,
 	}
 
 	got := make(map[string]bool)
