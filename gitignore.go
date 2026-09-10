@@ -356,7 +356,7 @@ func (m *Matcher) match(relPath string, isDir bool) bool {
 
 	for i := len(m.patterns) - 1; i >= 0; i-- {
 		p := &m.patterns[i]
-		if p.literalSuffix != "" && !strings.HasSuffix(lastSeg, p.literalSuffix) {
+		if p.literalSuffix != "" && !p.dirOnly && !strings.HasSuffix(lastSeg, p.literalSuffix) {
 			continue
 		}
 		if !matchPattern(p, pathSegs, isDir) {
@@ -373,7 +373,7 @@ func (m *Matcher) matchDetail(relPath string, isDir bool) MatchResult {
 
 	for i := len(m.patterns) - 1; i >= 0; i-- {
 		p := &m.patterns[i]
-		if p.literalSuffix != "" && !strings.HasSuffix(lastSeg, p.literalSuffix) {
+		if p.literalSuffix != "" && !p.dirOnly && !strings.HasSuffix(lastSeg, p.literalSuffix) {
 			continue
 		}
 		if !matchPattern(p, pathSegs, isDir) {

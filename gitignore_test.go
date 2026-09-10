@@ -893,6 +893,16 @@ func TestMatchVsGitCheckIgnore(t *testing.T) {
 			},
 		},
 		{
+			name:     "dir-only pattern with a wildcard, contents of the matched directory",
+			patterns: "*.egg-info/\n",
+			paths: []checkPath{
+				{"mypkg.egg-info", true},
+				{"mypkg.egg-info/PKG-INFO", false},
+				{"mypkg.egg-info/sub/x.txt", false},
+				{"notes.egg-info-backup", false},
+			},
+		},
+		{
 			name:     "mixed patterns",
 			patterns: "*.log\n!important.log\nbuild/\n/dist\nfoo/**/bar\n",
 			paths: []checkPath{
