@@ -1,0 +1,6 @@
+sample/generated/
+sample/generated/keepdir/
+sample/generated/keepdir/file
+sample/generated/otherfile
+sample/generated/otherdir/
+sample/generated/otherdir/x

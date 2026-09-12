@@ -745,16 +745,18 @@ func TestMatchNegateAnchored(t *testing.T) {
 func TestMatchDoubleStarSlash(t *testing.T) {
 	m := setupMatcher(t, "**/\n")
 
-	// **/ matches any directory
+	// **/ matches any directory, and therefore any path under a
+	// directory, since git does not enter an excluded directory.
 	shouldMatch := []string{
 		"a/",
 		"a/b/",
 		"deep/nested/dir/",
+		"a/b",             // file inside excluded directory a/
+		"deep/nested/dir", // file at any depth
 	}
 	shouldNotMatch := []string{
-		"a",   // file, not directory
-		"b",   // file
-		"a/b", // file inside directory
+		"a", // top-level file
+		"b", // top-level file
 	}
 
 	for _, path := range shouldMatch {
@@ -780,11 +782,9 @@ func TestMatchEscapedCharacters(t *testing.T) {
 	}
 }
 
-// TestMatchAgainstGitCheckIgnore verifies our implementation matches
-// git check-ignore for a variety of patterns. Each subtest creates a
-// real git repo, writes a .gitignore, and compares our result against
-// git's actual output.
-func TestMatchAgainstGitCheckIgnore(t *testing.T) {
+// TestMatchTable exercises a variety of pattern shapes against fixed
+// expectations. See TestConformance for direct comparison with git.
+func TestMatchTable(t *testing.T) {
 	tests := []struct {
 		name     string
 		patterns string
@@ -994,21 +994,19 @@ func TestMatchDirOnlyFrotz(t *testing.T) {
 }
 
 func TestMatchCannotReincludeUnderExcludedParent(t *testing.T) {
-	// From docs: "It is not possible to re-include a file if a parent directory
-	// of that file is excluded."
-	// Since our callers SkipDir on excluded directories, we test that the
-	// directory itself is excluded (the caller won't descend into it).
+	// gitignore(5): "It is not possible to re-include a file if a parent
+	// directory of that file is excluded." dir/ excludes the directory,
+	// so the negation on line 2 has no effect.
 	m := setupMatcher(t, "dir/\n!dir/important.txt\n")
 
-	// The directory is still excluded
 	if !m.Match("dir/") {
 		t.Error("expected dir/ to be ignored")
 	}
-	// The file would be re-included by the pattern, but since callers
-	// SkipDir on dir/, they never check this file. We verify the pattern
-	// semantics still work for completeness.
-	if m.Match("dir/important.txt") {
-		t.Error("negation should re-include dir/important.txt in pattern matching")
+	if !m.Match("dir/important.txt") {
+		t.Error("expected dir/important.txt to be ignored (parent dir/ is excluded)")
+	}
+	if !m.Match("dir/other.txt") {
+		t.Error("expected dir/other.txt to be ignored (parent dir/ is excluded)")
 	}
 }
 
@@ -1072,8 +1070,9 @@ func TestMatchStarExtension(t *testing.T) {
 func TestMatchDoubleStarTrailingDir(t *testing.T) {
 	m := setupMatcher(t, "foo/**/\n")
 
-	shouldMatch := []string{"foo/", "foo/abc/", "foo/x/y/z/"}
-	shouldNotMatch := []string{"foo"}
+	// foo/**/ matches directories inside foo, not foo itself.
+	shouldMatch := []string{"foo/abc/", "foo/x/y/z/"}
+	shouldNotMatch := []string{"foo", "foo/"}
 
 	for _, path := range shouldMatch {
 		if !m.Match(path) {
@@ -1106,13 +1105,15 @@ func TestMatchDoubleStarWithExtension(t *testing.T) {
 }
 
 func TestMatchNegationSubdirectoryFilter(t *testing.T) {
+	// abc excludes the directory abc, so nothing under it can be
+	// re-included. abc/* would be needed for the negation to take effect.
 	m := setupMatcher(t, "abc\n!abc/b\n")
 
 	if !m.Match("abc/a.js") {
 		t.Error("expected abc/a.js to match")
 	}
-	if m.Match("abc/b/b.js") {
-		t.Error("expected abc/b/b.js to not match")
+	if !m.Match("abc/b/b.js") {
+		t.Error("expected abc/b/b.js to match (parent abc is excluded)")
 	}
 }
 

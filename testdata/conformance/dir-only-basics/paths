@@ -1,0 +1,8 @@
+buildfile
+build/
+build/output.js
+sub/build/
+sub/build/x
+mypkg.egg-info/
+mypkg.egg-info/PKG-INFO
+mypkg.egg-info-backup

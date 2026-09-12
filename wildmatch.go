@@ -4,9 +4,12 @@ package gitignore
 // "[:" and ":]", used when skipping past them during bracket parsing.
 const posixClassOffset = 2
 
-// matchSegments matches path segments against pattern segments using two-pointer
-// backtracking. A doubleStar segment matches zero or more path segments.
-func matchSegments(patSegs []segment, pathSegs []string) bool {
+// matchSegments matches path segments against pattern segments using
+// two-pointer backtracking. A doubleStar segment matches zero or more path
+// segments. When tailAtLeastOne is set and the pattern ends in a doubleStar,
+// that final doubleStar must match at least one path segment; this is how
+// "foo/**" matches "foo/x" but not "foo" itself.
+func matchSegments(patSegs []segment, pathSegs []string, tailAtLeastOne bool) bool {
 	px, tx := 0, 0
 	// Backtrack point for the most recent ** we passed.
 	starPx, starTx := -1, -1
@@ -34,12 +37,20 @@ func matchSegments(patSegs []segment, pathSegs []string) bool {
 		return false
 	}
 
-	// Remaining pattern segments must all be ** to match.
+	// Any remaining pattern segments were not entered by the main loop and
+	// so match zero path segments. That is fine for leading and interior **
+	// but not for a trailing one when tailAtLeastOne is set. Consecutive **
+	// are collapsed at compile time, so at most one segment remains here in
+	// the trailing case.
+	remaining := px
 	for px < len(patSegs) {
 		if !patSegs[px].doubleStar {
 			return false
 		}
 		px++
+	}
+	if tailAtLeastOne && remaining < len(patSegs) {
+		return false
 	}
 	return true
 }

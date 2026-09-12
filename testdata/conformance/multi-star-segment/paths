@@ -1,0 +1,11 @@
+target
+a/target
+a/b/target
+src/
+src/f
+src/x/
+src/x/y
+mid/end
+mid/a/end
+mid/a/b/end
+other

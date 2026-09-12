@@ -16,16 +16,16 @@ type segment struct {
 }
 
 type pattern struct {
-	segments      []segment
-	negate        bool
-	dirOnly       bool // trailing slash pattern or trailing /** pattern
-	hasConcrete   bool // has at least one non-** segment
-	anchored      bool
-	prefix        []string // directory scope segments for nested .gitignore
-	text          string   // original pattern text before compilation
-	source        string   // file path this pattern came from, empty for programmatic
-	line          int      // 1-based line number in source file
-	literalSuffix string   // fast-reject: last segment must end with this (e.g. ".log" from "*.log")
+	segments       []segment
+	negate         bool
+	dirOnly        bool // trailing slash pattern
+	tailDoubleStar bool // pattern ends in "/**"
+	anchored       bool
+	prefix         []string // directory scope segments for nested .gitignore
+	text           string   // original pattern text before compilation
+	source         string   // file path this pattern came from, empty for programmatic
+	line           int      // 1-based line number in source file
+	literalSuffix  string   // fast-reject: last segment must end with this (e.g. ".log" from "*.log")
 }
 
 // Matcher checks paths against gitignore rules collected from .gitignore files,
@@ -350,45 +350,62 @@ func (m *Matcher) MatchDetail(relPath string) MatchResult {
 	return m.matchDetail(relPath, isDir)
 }
 
+// match reports whether relPath is ignored. Git decides ignore status
+// while walking the tree and does not enter an excluded directory, so a
+// path is ignored if any of its parent directories is. That is checked
+// here by testing each proper prefix of the path as a directory before
+// testing the full path.
 func (m *Matcher) match(relPath string, isDir bool) bool {
 	pathSegs := strings.Split(relPath, "/")
-	lastSeg := pathSegs[len(pathSegs)-1]
-
-	for i := len(m.patterns) - 1; i >= 0; i-- {
-		p := &m.patterns[i]
-		if p.literalSuffix != "" && !p.dirOnly && !strings.HasSuffix(lastSeg, p.literalSuffix) {
-			continue
+	for end := 1; end < len(pathSegs); end++ {
+		if idx := m.findMatch(pathSegs[:end], true); idx >= 0 && !m.patterns[idx].negate {
+			return true
 		}
-		if !matchPattern(p, pathSegs, isDir) {
-			continue
-		}
-		return !p.negate
 	}
-	return false
+	idx := m.findMatch(pathSegs, isDir)
+	return idx >= 0 && !m.patterns[idx].negate
 }
 
 func (m *Matcher) matchDetail(relPath string, isDir bool) MatchResult {
 	pathSegs := strings.Split(relPath, "/")
-	lastSeg := pathSegs[len(pathSegs)-1]
-
-	for i := len(m.patterns) - 1; i >= 0; i-- {
-		p := &m.patterns[i]
-		if p.literalSuffix != "" && !p.dirOnly && !strings.HasSuffix(lastSeg, p.literalSuffix) {
-			continue
-		}
-		if !matchPattern(p, pathSegs, isDir) {
-			continue
-		}
-		return MatchResult{
-			Ignored: !p.negate,
-			Matched: true,
-			Pattern: p.text,
-			Source:  p.source,
-			Line:    p.line,
-			Negate:  p.negate,
+	for end := 1; end < len(pathSegs); end++ {
+		if idx := m.findMatch(pathSegs[:end], true); idx >= 0 && !m.patterns[idx].negate {
+			return m.resultFor(idx)
 		}
 	}
+	if idx := m.findMatch(pathSegs, isDir); idx >= 0 {
+		return m.resultFor(idx)
+	}
 	return MatchResult{}
+}
+
+// findMatch returns the index of the last pattern that matches pathSegs,
+// or -1 if none does. Patterns are scanned from last to first because
+// gitignore uses last-match-wins ordering.
+func (m *Matcher) findMatch(pathSegs []string, isDir bool) int {
+	lastSeg := pathSegs[len(pathSegs)-1]
+	for i := len(m.patterns) - 1; i >= 0; i-- {
+		p := &m.patterns[i]
+		if p.literalSuffix != "" && !strings.HasSuffix(lastSeg, p.literalSuffix) {
+			continue
+		}
+		if matchPattern(p, pathSegs, isDir) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *Matcher) resultFor(idx int) MatchResult {
+	p := &m.patterns[idx]
+	return MatchResult{
+		Ignored: !p.negate,
+		Matched: true,
+		Pattern: p.text,
+		Source:  p.source,
+		Line:    p.line,
+		Negate:  p.negate,
+	}
 }
 
 // matchPattern checks whether pathSegs matches the compiled pattern,
@@ -396,7 +413,9 @@ func (m *Matcher) matchDetail(relPath string, isDir bool) MatchResult {
 func matchPattern(p *pattern, pathSegs []string, isDir bool) bool {
 	segs := pathSegs
 	if n := len(p.prefix); n > 0 {
-		if len(segs) < n {
+		// Rules from a nested .gitignore apply only to entries strictly
+		// inside that directory, never to the directory itself.
+		if len(segs) <= n {
 			return false
 		}
 		for i, ps := range p.prefix {
@@ -406,34 +425,10 @@ func matchPattern(p *pattern, pathSegs []string, isDir bool) bool {
 		}
 		segs = segs[n:]
 	}
-
-	if p.dirOnly {
-		// Dir-only patterns (trailing slash): match the directory itself,
-		// or match descendants (files/dirs under the matched directory).
-		if matchSegments(p.segments, segs) {
-			// A non-dir path may still be under a matched directory, so let
-			// exclusions fall through; negations don't inherit downwards.
-			if isDir || p.negate {
-				return isDir
-			}
-		}
-		// Only do descendant matching when the pattern identifies a specific
-		// directory (has at least one non-** segment). Pure ** patterns like
-		// "**/" only match directory paths directly.
-		if !p.hasConcrete {
-			return false
-		}
-		// Check if the path is a descendant of a matched directory by trying
-		// the pattern against every prefix of the path segments.
-		for end := len(segs) - 1; end >= 1; end-- {
-			if matchSegments(p.segments, segs[:end]) {
-				return true
-			}
-		}
+	if p.dirOnly && !isDir {
 		return false
 	}
-
-	return matchSegments(p.segments, segs)
+	return matchSegments(p.segments, segs, p.tailDoubleStar)
 }
 
 func (m *Matcher) addPatterns(data []byte, dir, source string) {
@@ -516,6 +511,15 @@ func compilePattern(line, dir string) (pattern, string) {
 		}
 	}
 
+	// A pattern ending "/**" matches everything inside the named directory
+	// but not the directory itself. Record that here so matchSegments can
+	// require the trailing ** to consume at least one path segment. Git
+	// treats any run of two or more asterisks as ** when it forms a whole
+	// segment, so "/***" and beyond count too.
+	if i := strings.LastIndexByte(line, '/'); i >= 0 {
+		p.tailDoubleStar = allStars(line[i+1:])
+	}
+
 	segs, anchored := buildSegments(line, hasLeadingSlash)
 	p.anchored = anchored
 
@@ -523,24 +527,7 @@ func compilePattern(line, dir string) (pattern, string) {
 		return pattern{}, msg
 	}
 
-	// Trailing /** means "match directory and its contents, not files with the
-	// same name". In git, "data/**" matches data/ and data/file but not data
-	// (as a file). This is equivalent to dirOnly semantics, so strip the
-	// trailing ** and set dirOnly.
-	if !p.dirOnly && len(segs) >= 2 && segs[len(segs)-1].doubleStar {
-		segs = segs[:len(segs)-1]
-		p.dirOnly = true
-	}
-
-	segs = appendTrailingDoubleStar(segs, p.dirOnly)
-
 	p.segments = segs
-	for _, s := range segs {
-		if !s.doubleStar {
-			p.hasConcrete = true
-			break
-		}
-	}
 	p.literalSuffix = extractLiteralSuffix(segs)
 	return p, ""
 }
@@ -559,7 +546,7 @@ func buildSegments(line string, hasLeadingSlash bool) ([]segment, bool) {
 	}
 
 	for _, raw := range rawSegs {
-		if raw == "**" {
+		if allStars(raw) {
 			segs = append(segs, segment{doubleStar: true})
 		} else {
 			segs = append(segs, segment{raw: raw})
@@ -576,6 +563,20 @@ func buildSegments(line string, hasLeadingSlash bool) ([]segment, bool) {
 	return collapsed, anchored
 }
 
+// allStars reports whether s consists of two or more '*' bytes and nothing
+// else. Git's wildmatch treats such a segment the same as **.
+func allStars(s string) bool {
+	if len(s) < 2 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '*' {
+			return false
+		}
+	}
+	return true
+}
+
 // validateSegmentBrackets checks bracket expressions in all concrete segments.
 func validateSegmentBrackets(segs []segment) string {
 	for _, seg := range segs {
@@ -587,15 +588,6 @@ func validateSegmentBrackets(segs []segment) string {
 		}
 	}
 	return ""
-}
-
-// appendTrailingDoubleStar adds an implicit ** at the end for non-dir-only
-// patterns so that matching "foo" also matches "foo/anything".
-func appendTrailingDoubleStar(segs []segment, dirOnly bool) []segment {
-	if !dirOnly && (len(segs) == 0 || !segs[len(segs)-1].doubleStar) {
-		segs = append(segs, segment{doubleStar: true})
-	}
-	return segs
 }
 
 // extractLiteralSuffix finds the literal trailing portion of the last concrete
@@ -628,10 +620,12 @@ func extractLiteralSuffix(segs []segment) string {
 		return ""
 	}
 
-	// Bail if the suffix contains wildcards, brackets, or escapes.
+	// Bail if the suffix contains wildcards, brackets, or escapes. A ']'
+	// here means the '*' found above was inside a bracket expression and
+	// is literal, so the suffix boundary is wrong.
 	for i := 0; i < len(suffix); i++ {
 		switch suffix[i] {
-		case '*', '?', '[', '\\':
+		case '*', '?', '[', ']', '\\':
 			return ""
 		}
 	}

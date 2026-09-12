@@ -1,0 +1,8 @@
+root-only
+sub/root-only
+unanchored
+sub/unanchored
+foo/
+foo/test.json
+foo/bar/
+foo/bar/hello.c

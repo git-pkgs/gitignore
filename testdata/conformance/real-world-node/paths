@@ -1,0 +1,16 @@
+node_modules/
+node_modules/lodash/index.js
+packages/app/node_modules/
+packages/app/node_modules/x
+debug.log
+yarn-error.log
+sub/yarn-error.log
+distfile
+dist/
+dist/bundle.js
+sub/dist/bundle.js
+coverage/
+coverage/lcov.info
+sub/coverage/
+sub/coverage/x
+src/index.js
