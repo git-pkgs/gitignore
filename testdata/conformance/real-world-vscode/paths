@@ -1,0 +1,10 @@
+.vscode/
+.vscode/settings.json
+.vscode/tasks.json
+.vscode/launch.json
+.vscode/extensions.json
+.vscode/other.json
+.vscode/sub/
+.vscode/sub/x
+build.vsix
+src/main.go

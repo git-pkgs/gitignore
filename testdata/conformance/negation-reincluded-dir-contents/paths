@@ -1,0 +1,5 @@
+# settings.json is a directory here, not a file
+.vscode/
+.vscode/settings.json/
+.vscode/settings.json/keep
+.vscode/other
