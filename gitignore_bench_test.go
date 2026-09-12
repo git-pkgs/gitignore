@@ -112,6 +112,30 @@ func BenchmarkMatchDeepPath(b *testing.B) {
 	}
 }
 
+func BenchmarkMatchLiteral(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"RootHit", "vendor/", true},
+		{"DeepHit", "a/b/c/d/e/f/g/vendor/", true},
+		{"DeepMiss", "a/b/c/d/e/f/g/source/", false},
+		{"ExcludedParent", "vendor/a/b/c/d/e/f/g/source.go", true},
+		{"SuffixCollision", "a/b/c/d/e/f/g/myvendor/", false},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			m := benchMatcher(b, realisticPatterns())
+			if got := m.Match(tc.path); got != tc.want {
+				b.Fatalf("Match(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+			for b.Loop() {
+				m.Match(tc.path)
+			}
+		})
+	}
+}
+
 func BenchmarkMatchNestedPatterns(b *testing.B) {
 	m := benchMatcher(b, realisticPatterns())
 	for _, dir := range []string{"src", "src/pkg", "src/pkg/internal", "src/pkg/internal/util"} {
