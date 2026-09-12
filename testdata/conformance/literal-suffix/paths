@@ -1,0 +1,20 @@
+vendor/
+vendor/keep
+myvendor/
+myvendor/keep
+root-only
+sub/root-only
+nested/target
+nested/mytarget
+other/target
+a/cache/
+a/cache/file
+a/mycache
+a/contents/
+a/contents/file
+question1
+question
+bracket
+brecket
+escaped name
+literal]

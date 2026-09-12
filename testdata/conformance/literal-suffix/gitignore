@@ -1,0 +1,10 @@
+vendor/
+!vendor/keep
+/root-only
+nested/target
+**/cache
+**/contents/**
+question?
+br[ae]cket
+escaped\ name
+literal]
