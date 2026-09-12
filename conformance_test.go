@@ -123,6 +123,31 @@ func TestConformanceHarnessSelfCheck(t *testing.T) {
 	}
 }
 
+func TestConformanceGitStartupFailure(t *testing.T) {
+	requireGit(t)
+	if os.Getenv("GITIGNORE_TEST_STARTUP_FAILURE") == "1" {
+		gitCheckIgnore(t, filepath.Join(t.TempDir(), "missing"), []conformancePath{{rel: "file"}})
+		return
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(executable, "-test.run=^TestConformanceGitStartupFailure$")
+	cmd.Env = append(os.Environ(), "GITIGNORE_TEST_STARTUP_FAILURE=1")
+	out, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+		t.Fatalf("expected test failure, got %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("git check-ignore:")) || !bytes.Contains(out, []byte("missing")) {
+		t.Fatalf("missing startup error diagnostic:\n%s", out)
+	}
+	if bytes.Contains(out, []byte("panic:")) {
+		t.Fatalf("startup failure caused a panic:\n%s", out)
+	}
+}
+
 // TestConformanceFuzz generates random pattern sets and paths, then compares
 // the library against git check-ignore. It is skipped under -short.
 func TestConformanceFuzz(t *testing.T) {
@@ -280,7 +305,11 @@ func gitCheckIgnore(t *testing.T, root string, paths []conformancePath) map[stri
 	if err != nil {
 		// check-ignore exits 1 when no path is ignored; that is not an error
 		// for our purposes. Any other failure is.
-		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("git check-ignore: %v", err)
+		}
+		if ee.ExitCode() != 1 {
 			t.Fatalf("git check-ignore: %v\n%s", err, ee.Stderr)
 		}
 	}
