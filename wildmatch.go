@@ -126,28 +126,14 @@ func matchSegment(glob, text string) bool {
 // glob[pos] (the '['). Returns (matched, posAfterBracket, valid).
 // If the bracket has no closing ']', valid is false.
 func matchBracket(glob string, pos int, ch byte) (bool, int, bool) {
-	i := pos + 1 // skip opening [
-	if i >= len(glob) {
-		return false, 0, false
-	}
-
-	negate := false
-	if glob[i] == '!' || glob[i] == '^' {
-		negate = true
-		i++
-	}
-
+	i, negate := bracketStart(glob, pos)
 	matched := false
-	first := true // ] is literal when it's the first char after [, [!, or [^
+	first := i // A leading ] is literal.
 
 	for i < len(glob) {
-		if glob[i] == ']' && !first {
-			if negate {
-				matched = !matched
-			}
-			return matched, i + 1, true
+		if glob[i] == ']' && i != first {
+			return matched != negate, i + 1, true
 		}
-		first = false
 
 		var hit bool
 		hit, i = matchBracketElement(glob, i, ch)
@@ -159,17 +145,27 @@ func matchBracket(glob string, pos int, ch byte) (bool, int, bool) {
 	return false, 0, false
 }
 
+func bracketStart(glob string, pos int) (int, bool) {
+	i := pos + 1
+	if i < len(glob) && (glob[i] == '!' || glob[i] == '^') {
+		return i + 1, true
+	}
+	return i, false
+}
+
+func posixClassEnd(glob string, i int) int {
+	if glob[i] == '[' && i+1 < len(glob) && glob[i+1] == ':' {
+		return findPosixClassEnd(glob, i+posixClassOffset)
+	}
+	return -1
+}
+
 // matchBracketElement matches a single element inside a bracket expression:
 // a POSIX class ([:name:]), a range (lo-hi), or a literal character.
 // Returns whether ch matched and the new index past the element.
 func matchBracketElement(glob string, i int, ch byte) (bool, int) {
-	// POSIX character class: [:name:]
-	if glob[i] == '[' && i+1 < len(glob) && glob[i+1] == ':' {
-		end := findPosixClassEnd(glob, i+posixClassOffset)
-		if end >= 0 {
-			name := glob[i+posixClassOffset : end]
-			return matchPosixClass(name, ch), end + posixClassOffset
-		}
+	if end := posixClassEnd(glob, i); end >= 0 {
+		return matchPosixClass(glob[i+posixClassOffset:end], ch), end + posixClassOffset
 	}
 
 	lo, next := readBracketChar(glob, i)

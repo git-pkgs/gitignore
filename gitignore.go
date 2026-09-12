@@ -18,10 +18,9 @@ type segment struct {
 type pattern struct {
 	segments       []segment
 	negate         bool
-	dirOnly        bool // trailing slash pattern
-	tailDoubleStar bool // pattern ends in "/**"
-	baseOnly       bool // ** followed by one concrete segment
-	anchored       bool
+	dirOnly        bool   // trailing slash pattern
+	tailDoubleStar bool   // pattern ends in "/**"
+	baseOnly       bool   // ** followed by one concrete segment
 	text           string // original pattern text before compilation
 	source         string // file path this pattern came from, empty for programmatic
 	line           int    // 1-based line number in source file
@@ -188,9 +187,9 @@ func expandTilde(path string) string {
 // skipped. Oversized files under MaxIgnoreFileSize are skipped and recorded
 // in Errors.
 func NewFromDirectory(root string, opts ...Option) *Matcher {
-	m := New(root, opts...)
-	_ = walkRecursive(root, "", m, nil, false, true, false)
-	return m
+	w := walker{root: root, matcher: New(root, opts...), retainPatterns: true}
+	_ = w.walk("")
+	return w.matcher
 }
 
 // Walk walks the directory tree rooted at root, calling fn for each file
@@ -208,7 +207,8 @@ func Walk(root string, fn func(path string, d fs.DirEntry) error, opts ...Option
 	if err != nil {
 		return err
 	}
-	return walkRecursive(root, "", m, fn, true, false, false)
+	w := walker{root: root, matcher: m, fn: fn, stopOnSizeError: true}
+	return w.walk("")
 }
 
 // WalkFrom walks the directory tree starting at a subdirectory of root,
@@ -241,7 +241,7 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error, opt
 	}
 
 	// Load .gitignore from each ancestor directory between root and start
-	// (exclusive of start itself, which walkRecursive loads).
+	// (exclusive of start itself, which the walker loads).
 	{
 		slashed := filepath.ToSlash(start)
 		for off := 0; ; {
@@ -263,37 +263,40 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error, opt
 		return err
 	}
 
-	if fn != nil {
-		if err := fn(start, fs.FileInfoToDirEntry(info)); err != nil {
-			return err
-		}
+	w := walker{root: root, start: start, matcher: m, fn: fn, stopOnSizeError: true}
+	if err := w.visit(start, fs.FileInfoToDirEntry(info)); err != nil {
+		return err
 	}
 
-	return walkRecursive(root, start, m, fn, true, false, true)
+	return w.walk(start)
 }
 
-func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) error, stopOnSizeError, retainPatterns, checkParents bool) error {
-	patternCount := len(m.patterns)
-	groupCount := len(m.groups)
-	if !retainPatterns {
-		defer func() {
-			clear(m.patterns[patternCount:])
-			m.patterns = m.patterns[:patternCount]
-			clear(m.groups[groupCount:])
-			m.groups = m.groups[:groupCount]
-			if groupCount > 0 {
-				m.groups[groupCount-1].end = patternCount
-			}
-		}()
+type walker struct {
+	root, start     string
+	matcher         *Matcher
+	fn              func(string, fs.DirEntry) error
+	retainPatterns  bool
+	stopOnSizeError bool
+}
+
+func (w *walker) visit(path string, entry fs.DirEntry) error {
+	if w.fn == nil {
+		return nil
 	}
-	dir := root
-	if rel != "" {
-		dir = filepath.Join(root, rel)
+	return w.fn(path, entry)
+}
+
+func (w *walker) walk(rel string) error {
+	m := w.matcher
+	if !w.retainPatterns {
+		defer m.restorePatterns(len(m.patterns), len(m.groups))
 	}
+	dir := w.root
 
 	// Load .gitignore for this directory before processing entries.
 	if rel != "" {
-		if err := m.addFromFile(filepath.Join(dir, ".gitignore"), filepath.ToSlash(rel)); err != nil && stopOnSizeError {
+		dir = filepath.Join(w.root, rel)
+		if err := m.addFromFile(filepath.Join(dir, ".gitignore"), filepath.ToSlash(rel)); err != nil && w.stopOnSizeError {
 			return err
 		}
 	}
@@ -311,29 +314,34 @@ func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) er
 			continue
 		}
 
-		entryRel := name
-		if rel != "" {
-			entryRel = filepath.Join(rel, name)
-		}
-
-		if m.match(filepath.ToSlash(entryRel), entry.IsDir(), checkParents) {
+		entryRel := filepath.Join(rel, name)
+		// Descendant directories have already passed their parent checks.
+		if m.match(filepath.ToSlash(entryRel), entry.IsDir(), rel == w.start) {
 			continue
 		}
 
-		if fn != nil {
-			if err := fn(entryRel, entry); err != nil {
-				return err
-			}
+		if err := w.visit(entryRel, entry); err != nil {
+			return err
 		}
 
 		if entry.IsDir() {
-			if err := walkRecursive(root, entryRel, m, fn, stopOnSizeError, retainPatterns, false); err != nil {
+			if err := w.walk(entryRel); err != nil {
 				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+func (m *Matcher) restorePatterns(patternCount, groupCount int) {
+	clear(m.patterns[patternCount:])
+	m.patterns = m.patterns[:patternCount]
+	clear(m.groups[groupCount:])
+	m.groups = m.groups[:groupCount]
+	if groupCount > 0 {
+		m.groups[groupCount-1].end = patternCount
+	}
 }
 
 // AddPatterns parses gitignore pattern lines from data and scopes them to
@@ -621,8 +629,7 @@ func compilePattern(line string) (pattern, string) {
 		p.tailDoubleStar = allStars(line[i+1:])
 	}
 
-	segs, anchored := buildSegments(line, hasLeadingSlash)
-	p.anchored = anchored
+	segs := buildSegments(line, hasLeadingSlash)
 
 	if msg := validateSegmentBrackets(segs); msg != "" {
 		return pattern{}, msg
@@ -637,7 +644,7 @@ func compilePattern(line string) (pattern, string) {
 
 // buildSegments splits a pattern line into segments, prepends ** for unanchored
 // patterns, and collapses consecutive ** segments.
-func buildSegments(line string, hasLeadingSlash bool) ([]segment, bool) {
+func buildSegments(line string, hasLeadingSlash bool) []segment {
 	rawSegs := strings.Split(line, "/")
 	anchored := hasLeadingSlash || len(rawSegs) > 1
 
@@ -663,7 +670,7 @@ func buildSegments(line string, hasLeadingSlash bool) ([]segment, bool) {
 		}
 		collapsed = append(collapsed, segs[i])
 	}
-	return collapsed, anchored
+	return collapsed
 }
 
 // allStars reports whether s consists of two or more '*' bytes and nothing
@@ -759,42 +766,23 @@ func validateBrackets(glob string) string {
 // Returns an error message if invalid, and the index of the closing ']' (or -1
 // if the bracket has no closing ']' and should be treated as literal).
 func validateBracketAt(glob string, pos int) (string, int) {
-	j := pos + 1
-	if j < len(glob) && (glob[j] == '!' || glob[j] == '^') {
-		j++
-	}
+	j, _ := bracketStart(glob, pos)
 	if j < len(glob) && glob[j] == ']' {
 		j++ // ] as first char is literal
 	}
 	for j < len(glob) && glob[j] != ']' {
-		if glob[j] == '\\' && j+1 < len(glob) {
-			j += posixClassOffset
+		if end := posixClassEnd(glob, j); end >= 0 {
+			name := glob[j+posixClassOffset : end]
+			if _, ok := posixClassMatchers[name]; !ok {
+				return "unknown POSIX class [:" + name + ":]", -1
+			}
+			j = end + posixClassOffset
 			continue
 		}
-		if glob[j] == '[' && j+1 < len(glob) && glob[j+1] == ':' {
-			end := findPosixClassEnd(glob, j+posixClassOffset)
-			if end >= 0 {
-				name := glob[j+posixClassOffset : end]
-				if !validPosixClassName(name) {
-					return "unknown POSIX class [:" + name + ":]", -1
-				}
-				j = end + posixClassOffset
-				continue
-			}
-		}
-		j++
+		_, j = readBracketChar(glob, j)
 	}
 	if j >= len(glob) {
 		return "unclosed bracket expression", -1
 	}
 	return "", j
-}
-
-func validPosixClassName(name string) bool {
-	switch name {
-	case "alnum", "alpha", "blank", "cntrl", "digit", "graph",
-		"lower", "print", "punct", "space", "upper", "xdigit":
-		return true
-	}
-	return false
 }
