@@ -47,6 +47,15 @@ m.AddFromFile("/path/to/repo/src/.gitignore", "src")
 m.AddPatterns([]byte("*.log\nbuild/\n"), "")
 ```
 
+To limit the bytes read from each ignore file, use `NewWithOptions` or `NewFromDirectoryWithOptions`:
+
+```go
+opts := gitignore.Options{MaxIgnoreFileSize: 1 << 20}
+m := gitignore.NewFromDirectoryWithOptions("/path/to/repo", opts)
+```
+
+The limit applies to global excludes, `.git/info/exclude`, and `.gitignore` files, including later `AddFromFile` calls. Oversized files are skipped entirely and recorded in `Errors()` with their source path and line zero. Nonpositive limits are unlimited. `AddPatterns` is unaffected, and the limit does not cap total memory across files.
+
 ## Matching
 
 `Match` uses the trailing-slash convention to distinguish files from directories. If you already know whether the path is a directory, `MatchPath` avoids that:
@@ -84,6 +93,8 @@ gitignore.WalkFrom("/path/to/repo", "src/pkg", func(path string, d fs.DirEntry) 
     return nil
 })
 ```
+
+`WalkWithOptions(root, opts, fn)` and `WalkFromWithOptions(root, start, opts, fn)` accept the same limits. They stop and return an `*IgnoreFileSizeError` when an oversized file is encountered. Its `Path` and `Limit` fields identify the file and configured byte limit; use `errors.As` to inspect it. Callbacks may already have run for earlier entries.
 
 ## Error handling
 
