@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -17,14 +18,13 @@ type segment struct {
 type pattern struct {
 	segments       []segment
 	negate         bool
-	dirOnly        bool // trailing slash pattern
-	tailDoubleStar bool // pattern ends in "/**"
-	anchored       bool
-	prefix         []string // directory scope segments for nested .gitignore
-	text           string   // original pattern text before compilation
-	source         string   // file path this pattern came from, empty for programmatic
-	line           int      // 1-based line number in source file
-	literalSuffix  string   // fast-reject: last segment must end with this (e.g. ".log" from "*.log")
+	dirOnly        bool   // trailing slash pattern
+	tailDoubleStar bool   // pattern ends in "/**"
+	baseOnly       bool   // ** followed by one concrete segment
+	text           string // original pattern text before compilation
+	source         string // file path this pattern came from, empty for programmatic
+	line           int    // 1-based line number in source file
+	literalSuffix  string // fast-reject: last segment must end with this (e.g. ".log" from "*.log")
 }
 
 // Matcher checks paths against gitignore rules collected from .gitignore files,
@@ -42,7 +42,13 @@ type pattern struct {
 type Matcher struct {
 	maxIgnoreFileSize int64
 	patterns          []pattern
+	groups            []patternGroup
 	errors            []PatternError
+}
+
+type patternGroup struct {
+	prefix     []string
+	start, end int
 }
 
 // PatternError records a pattern compilation error or a skipped oversized file.
@@ -181,9 +187,9 @@ func expandTilde(path string) string {
 // skipped. Oversized files under MaxIgnoreFileSize are skipped and recorded
 // in Errors.
 func NewFromDirectory(root string, opts ...Option) *Matcher {
-	m := New(root, opts...)
-	_ = walkRecursive(root, "", m, nil, false)
-	return m
+	w := walker{root: root, matcher: New(root, opts...), retainPatterns: true}
+	_ = w.walk("")
+	return w.matcher
 }
 
 // Walk walks the directory tree rooted at root, calling fn for each file
@@ -201,7 +207,8 @@ func Walk(root string, fn func(path string, d fs.DirEntry) error, opts ...Option
 	if err != nil {
 		return err
 	}
-	return walkRecursive(root, "", m, fn, true)
+	w := walker{root: root, matcher: m, fn: fn, stopOnSizeError: true}
+	return w.walk("")
 }
 
 // WalkFrom walks the directory tree starting at a subdirectory of root,
@@ -234,7 +241,7 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error, opt
 	}
 
 	// Load .gitignore from each ancestor directory between root and start
-	// (exclusive of start itself, which walkRecursive loads).
+	// (exclusive of start itself, which the walker loads).
 	{
 		slashed := filepath.ToSlash(start)
 		for off := 0; ; {
@@ -256,24 +263,40 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error, opt
 		return err
 	}
 
-	if fn != nil {
-		if err := fn(start, fs.FileInfoToDirEntry(info)); err != nil {
-			return err
-		}
+	w := walker{root: root, start: start, matcher: m, fn: fn, stopOnSizeError: true}
+	if err := w.visit(start, fs.FileInfoToDirEntry(info)); err != nil {
+		return err
 	}
 
-	return walkRecursive(root, start, m, fn, true)
+	return w.walk(start)
 }
 
-func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) error, stopOnSizeError bool) error {
-	dir := root
-	if rel != "" {
-		dir = filepath.Join(root, rel)
+type walker struct {
+	root, start     string
+	matcher         *Matcher
+	fn              func(string, fs.DirEntry) error
+	retainPatterns  bool
+	stopOnSizeError bool
+}
+
+func (w *walker) visit(path string, entry fs.DirEntry) error {
+	if w.fn == nil {
+		return nil
 	}
+	return w.fn(path, entry)
+}
+
+func (w *walker) walk(rel string) error {
+	m := w.matcher
+	if !w.retainPatterns {
+		defer m.restorePatterns(len(m.patterns), len(m.groups))
+	}
+	dir := w.root
 
 	// Load .gitignore for this directory before processing entries.
 	if rel != "" {
-		if err := m.addFromFile(filepath.Join(dir, ".gitignore"), filepath.ToSlash(rel)); err != nil && stopOnSizeError {
+		dir = filepath.Join(w.root, rel)
+		if err := m.addFromFile(filepath.Join(dir, ".gitignore"), filepath.ToSlash(rel)); err != nil && w.stopOnSizeError {
 			return err
 		}
 	}
@@ -291,29 +314,34 @@ func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) er
 			continue
 		}
 
-		entryRel := name
-		if rel != "" {
-			entryRel = filepath.Join(rel, name)
-		}
-
-		if m.MatchPath(filepath.ToSlash(entryRel), entry.IsDir()) {
+		entryRel := filepath.Join(rel, name)
+		// Descendant directories have already passed their parent checks.
+		if m.match(filepath.ToSlash(entryRel), entry.IsDir(), rel == w.start) {
 			continue
 		}
 
-		if fn != nil {
-			if err := fn(entryRel, entry); err != nil {
-				return err
-			}
+		if err := w.visit(entryRel, entry); err != nil {
+			return err
 		}
 
 		if entry.IsDir() {
-			if err := walkRecursive(root, entryRel, m, fn, stopOnSizeError); err != nil {
+			if err := w.walk(entryRel); err != nil {
 				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+func (m *Matcher) restorePatterns(patternCount, groupCount int) {
+	clear(m.patterns[patternCount:])
+	m.patterns = m.patterns[:patternCount]
+	clear(m.groups[groupCount:])
+	m.groups = m.groups[:groupCount]
+	if groupCount > 0 {
+		m.groups[groupCount-1].end = patternCount
+	}
 }
 
 // AddPatterns parses gitignore pattern lines from data and scopes them to
@@ -345,14 +373,14 @@ func (m *Matcher) addFromFile(absPath, relDir string) error {
 // Match returns true if the given path should be ignored.
 // The path should be slash-separated and relative to the repository root.
 // For directories, append a trailing slash (e.g. "vendor/").
-// Uses last-match-wins semantics: iterates patterns in reverse and returns
-// on the first match.
+// An ignored parent directory makes its descendants ignored. Otherwise,
+// the last matching rule determines whether the path is ignored.
 func (m *Matcher) Match(relPath string) bool {
 	isDir := strings.HasSuffix(relPath, "/")
 	if isDir {
 		relPath = relPath[:len(relPath)-1]
 	}
-	return m.match(relPath, isDir)
+	return m.match(relPath, isDir, true)
 }
 
 // MatchPath returns true if the given path should be ignored.
@@ -360,7 +388,7 @@ func (m *Matcher) Match(relPath string) bool {
 // a trailing slash convention. The path should be slash-separated,
 // relative to the repository root, and should not have a trailing slash.
 func (m *Matcher) MatchPath(relPath string, isDir bool) bool {
-	return m.match(relPath, isDir)
+	return m.match(relPath, isDir, true)
 }
 
 // MatchResult describes which pattern matched a path and whether
@@ -388,13 +416,18 @@ func (m *Matcher) MatchDetail(relPath string) MatchResult {
 // match reports whether relPath is ignored. Git decides ignore status
 // while walking the tree and does not enter an excluded directory, so a
 // path is ignored if any of its parent directories is. That is checked
-// here by testing each proper prefix of the path as a directory before
-// testing the full path.
-func (m *Matcher) match(relPath string, isDir bool) bool {
-	pathSegs := strings.Split(relPath, "/")
-	for end := 1; end < len(pathSegs); end++ {
-		if idx := m.findMatch(pathSegs[:end], true); idx >= 0 && !m.patterns[idx].negate {
-			return true
+// here unless the directory walk has already checked the parents.
+func (m *Matcher) match(relPath string, isDir, checkParents bool) bool {
+	if len(m.patterns) == 0 {
+		return false
+	}
+	var buf [pathBufferSize]string
+	pathSegs := splitPath(relPath, buf[:0])
+	if checkParents {
+		for end := 1; end < len(pathSegs); end++ {
+			if idx := m.findMatch(pathSegs[:end], true); idx >= 0 && !m.patterns[idx].negate {
+				return true
+			}
 		}
 	}
 	idx := m.findMatch(pathSegs, isDir)
@@ -402,7 +435,11 @@ func (m *Matcher) match(relPath string, isDir bool) bool {
 }
 
 func (m *Matcher) matchDetail(relPath string, isDir bool) MatchResult {
-	pathSegs := strings.Split(relPath, "/")
+	if len(m.patterns) == 0 {
+		return MatchResult{}
+	}
+	var buf [pathBufferSize]string
+	pathSegs := splitPath(relPath, buf[:0])
 	for end := 1; end < len(pathSegs); end++ {
 		if idx := m.findMatch(pathSegs[:end], true); idx >= 0 && !m.patterns[idx].negate {
 			return m.resultFor(idx)
@@ -414,17 +451,43 @@ func (m *Matcher) matchDetail(relPath string, isDir bool) MatchResult {
 	return MatchResult{}
 }
 
+const pathBufferSize = 16
+
+func splitPath(path string, segments []string) []string {
+	for part := range strings.SplitSeq(path, "/") {
+		if len(segments) == cap(segments) {
+			return strings.Split(path, "/")
+		}
+		segments = append(segments, part)
+	}
+	return segments
+}
+
 // findMatch returns the index of the last pattern that matches pathSegs,
 // or -1 if none does. Patterns are scanned from last to first because
 // gitignore uses last-match-wins ordering.
 func (m *Matcher) findMatch(pathSegs []string, isDir bool) int {
-	lastSeg := pathSegs[len(pathSegs)-1]
-	for i := len(m.patterns) - 1; i >= 0; i-- {
-		p := &m.patterns[i]
+	for g := len(m.groups) - 1; g >= 0; g-- {
+		group := &m.groups[g]
+		if !matchScope(pathSegs, group.prefix) {
+			continue
+		}
+		segs := pathSegs[len(group.prefix):]
+		if idx := findPattern(m.patterns[group.start:group.end], segs, isDir); idx >= 0 {
+			return group.start + idx
+		}
+	}
+	return -1
+}
+
+func findPattern(patterns []pattern, segs []string, isDir bool) int {
+	lastSeg := segs[len(segs)-1]
+	for i := len(patterns) - 1; i >= 0; i-- {
+		p := &patterns[i]
 		if p.literalSuffix != "" && !strings.HasSuffix(lastSeg, p.literalSuffix) {
 			continue
 		}
-		if matchPattern(p, pathSegs, isDir) {
+		if matchPattern(p, segs, isDir) {
 			return i
 		}
 	}
@@ -443,30 +506,35 @@ func (m *Matcher) resultFor(idx int) MatchResult {
 	}
 }
 
-// matchPattern checks whether pathSegs matches the compiled pattern,
-// including the directory prefix scope and dirOnly handling.
-func matchPattern(p *pattern, pathSegs []string, isDir bool) bool {
-	segs := pathSegs
-	if n := len(p.prefix); n > 0 {
-		// Rules from a nested .gitignore apply only to entries strictly
-		// inside that directory, never to the directory itself.
-		if len(segs) <= n {
+// Nested rules cannot match their containing directory.
+func matchScope(segs, prefix []string) bool {
+	if len(segs) <= len(prefix) {
+		return false
+	}
+	for i, part := range prefix {
+		if segs[i] != part {
 			return false
 		}
-		for i, ps := range p.prefix {
-			if segs[i] != ps {
-				return false
-			}
-		}
-		segs = segs[n:]
 	}
+	return true
+}
+
+func matchPattern(p *pattern, segs []string, isDir bool) bool {
 	if p.dirOnly && !isDir {
 		return false
+	}
+	if p.baseOnly {
+		return matchSegment(p.segments[len(p.segments)-1].raw, segs[len(segs)-1])
 	}
 	return matchSegments(p.segments, segs, p.tailDoubleStar)
 }
 
 func (m *Matcher) addPatterns(data []byte, dir, source string) {
+	start := len(m.patterns)
+	var prefix []string
+	if dir != "" {
+		prefix = strings.Split(dir, "/")
+	}
 	lineNum := 0
 	for len(data) > 0 {
 		var raw []byte
@@ -477,7 +545,7 @@ func (m *Matcher) addPatterns(data []byte, dir, source string) {
 		if line == "" || line[0] == '#' {
 			continue
 		}
-		p, errMsg := compilePattern(line, dir)
+		p, errMsg := compilePattern(line)
 		if errMsg != "" {
 			m.errors = append(m.errors, PatternError{
 				Pattern: line,
@@ -491,6 +559,13 @@ func (m *Matcher) addPatterns(data []byte, dir, source string) {
 		p.source = source
 		p.line = lineNum
 		m.patterns = append(m.patterns, p)
+	}
+	if len(m.patterns) > start {
+		if n := len(m.groups); n > 0 && slices.Equal(m.groups[n-1].prefix, prefix) {
+			m.groups[n-1].end = len(m.patterns)
+		} else {
+			m.groups = append(m.groups, patternGroup{prefix: prefix, start: start, end: len(m.patterns)})
+		}
 	}
 }
 
@@ -512,11 +587,8 @@ func trimTrailingSpaces(s string) string {
 // compilePattern compiles a gitignore pattern line into a pattern struct.
 // Returns the compiled pattern and an empty string on success, or a zero
 // pattern and an error message on failure.
-func compilePattern(line, dir string) (pattern, string) {
+func compilePattern(line string) (pattern, string) {
 	var p pattern
-	if dir != "" {
-		p.prefix = strings.Split(dir, "/")
-	}
 
 	// Handle negation
 	if strings.HasPrefix(line, "!") {
@@ -557,21 +629,22 @@ func compilePattern(line, dir string) (pattern, string) {
 		p.tailDoubleStar = allStars(line[i+1:])
 	}
 
-	segs, anchored := buildSegments(line, hasLeadingSlash)
-	p.anchored = anchored
+	segs := buildSegments(line, hasLeadingSlash)
 
 	if msg := validateSegmentBrackets(segs); msg != "" {
 		return pattern{}, msg
 	}
 
 	p.segments = segs
+	const basePatternSegments = 2
+	p.baseOnly = len(segs) == basePatternSegments && segs[0].doubleStar && !segs[1].doubleStar
 	p.literalSuffix = extractLiteralSuffix(segs)
 	return p, ""
 }
 
 // buildSegments splits a pattern line into segments, prepends ** for unanchored
 // patterns, and collapses consecutive ** segments.
-func buildSegments(line string, hasLeadingSlash bool) ([]segment, bool) {
+func buildSegments(line string, hasLeadingSlash bool) []segment {
 	rawSegs := strings.Split(line, "/")
 	anchored := hasLeadingSlash || len(rawSegs) > 1
 
@@ -597,7 +670,7 @@ func buildSegments(line string, hasLeadingSlash bool) ([]segment, bool) {
 		}
 		collapsed = append(collapsed, segs[i])
 	}
-	return collapsed, anchored
+	return collapsed
 }
 
 // allStars reports whether s consists of two or more '*' bytes and nothing
@@ -629,8 +702,8 @@ func validateSegmentBrackets(segs []segment) string {
 
 // extractLiteralSuffix finds the literal trailing portion of the last concrete
 // segment, for fast rejection. For example, "*.log" yields ".log", "test_*.go"
-// yields ".go". Only extracts a suffix when the segment is a simple star-prefix
-// glob with no brackets, escapes, or question marks in the suffix portion.
+// yields ".go". Literal segments use the entire name. Suffixes containing
+// brackets, escapes, or question marks are excluded.
 //
 // The suffix is only extracted when the last segment is concrete (not **),
 // because the fast-reject check compares against the final path segment.
@@ -649,9 +722,6 @@ func extractLiteralSuffix(segs []segment) string {
 
 	// Find the last * in the segment. Everything after it must be literal.
 	starIdx := strings.LastIndex(last, "*")
-	if starIdx < 0 {
-		return ""
-	}
 	suffix := last[starIdx+1:]
 	if suffix == "" {
 		return ""
@@ -696,42 +766,23 @@ func validateBrackets(glob string) string {
 // Returns an error message if invalid, and the index of the closing ']' (or -1
 // if the bracket has no closing ']' and should be treated as literal).
 func validateBracketAt(glob string, pos int) (string, int) {
-	j := pos + 1
-	if j < len(glob) && (glob[j] == '!' || glob[j] == '^') {
-		j++
-	}
+	j, _ := bracketStart(glob, pos)
 	if j < len(glob) && glob[j] == ']' {
 		j++ // ] as first char is literal
 	}
 	for j < len(glob) && glob[j] != ']' {
-		if glob[j] == '\\' && j+1 < len(glob) {
-			j += posixClassOffset
+		if end := posixClassEnd(glob, j); end >= 0 {
+			name := glob[j+posixClassOffset : end]
+			if _, ok := posixClassMatchers[name]; !ok {
+				return "unknown POSIX class [:" + name + ":]", -1
+			}
+			j = end + posixClassOffset
 			continue
 		}
-		if glob[j] == '[' && j+1 < len(glob) && glob[j+1] == ':' {
-			end := findPosixClassEnd(glob, j+posixClassOffset)
-			if end >= 0 {
-				name := glob[j+posixClassOffset : end]
-				if !validPosixClassName(name) {
-					return "unknown POSIX class [:" + name + ":]", -1
-				}
-				j = end + posixClassOffset
-				continue
-			}
-		}
-		j++
+		_, j = readBracketChar(glob, j)
 	}
 	if j >= len(glob) {
 		return "unclosed bracket expression", -1
 	}
 	return "", j
-}
-
-func validPosixClassName(name string) bool {
-	switch name {
-	case "alnum", "alpha", "blank", "cntrl", "digit", "graph",
-		"lower", "print", "punct", "space", "upper", "xdigit":
-		return true
-	}
-	return false
 }

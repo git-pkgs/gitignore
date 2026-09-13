@@ -11,7 +11,7 @@ A Go library for matching paths against gitignore rules. Pattern matching uses a
 - Directory-only patterns (trailing `/`) with descendant matching
 - Match provenance via `MatchDetail` (which pattern, file, and line number matched)
 - Invalid pattern surfacing via `Errors()`
-- Literal suffix fast-reject for common patterns like `*.log`
+- Fast rejection for literal names and suffix patterns like `*.log`
 
 ```go
 import "github.com/git-pkgs/gitignore"
@@ -111,7 +111,17 @@ A Matcher is safe for concurrent `Match`/`MatchPath`/`MatchDetail` calls once co
 
 ## Match semantics
 
-Paths should use forward slashes and be relative to the repository root. Last-match-wins, same as git.
+Paths should use forward slashes and be relative to the repository root. An ignored parent directory excludes all its descendants; otherwise, the last matching rule for the path wins.
+
+## Benchmarks
+
+Run benchmarks on an otherwise idle machine, using the same Go toolchain for both revisions. Record repeated samples and memory allocations:
+
+```sh
+go test -run '^$' -bench . -benchmem -count=10 -cpu=1
+```
+
+`BenchmarkCompile` and `BenchmarkWalkTree` include filesystem reads and a Git subprocess through `New`; `BenchmarkAddPatterns` measures parsing without filesystem access. Compare samples with `benchstat` and check the timing spread before quoting speed changes.
 
 ## License
 

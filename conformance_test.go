@@ -148,6 +148,50 @@ func TestConformanceGitStartupFailure(t *testing.T) {
 	}
 }
 
+func TestConformanceNestedWalk(t *testing.T) {
+	requireGit(t)
+	isolateGitEnv(t)
+	paths := parsePathList("a/cache/x\na/keep.log\na/drop.log\na/sub/keep.log\na/sub/drop.log\nb/drop.log\nb/keep.log\nb/cache/x\nblocked/sub/file\n")
+	root := buildRepo(t, "*.log\nblocked/\n", paths)
+	for dir, patterns := range map[string]string{
+		"a": "!keep.log\ncache/\n", "a/sub": "!drop.log\n",
+		"b": "!drop.log\n", "blocked/sub": "!file\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, dir, ".gitignore"), []byte(patterns), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := gitCheckIgnore(t, root, paths)
+	m := gitignore.NewFromDirectory(root)
+	for _, p := range paths {
+		if got := m.Match(p.query()); got != want[p.rel] {
+			t.Errorf("NewFromDirectory Match(%q) = %v, git = %v", p.rel, got, want[p.rel])
+		}
+	}
+	for _, start := range []string{"", "a", "a/sub", "b", "blocked/sub"} {
+		visited := make(map[string]bool)
+		visit := func(path string, _ os.DirEntry) error {
+			visited[filepath.ToSlash(path)] = true
+			return nil
+		}
+		var err error
+		if start == "" {
+			err = gitignore.Walk(root, visit)
+		} else {
+			err = gitignore.WalkFrom(root, start, visit)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range paths {
+			inScope := start == "" || strings.HasPrefix(p.rel, start+"/")
+			if expected := inScope && !want[p.rel]; visited[p.rel] != expected {
+				t.Errorf("walk from %q: visited %q = %v, want %v", start, p.rel, visited[p.rel], expected)
+			}
+		}
+	}
+}
+
 // TestConformanceFuzz generates random pattern sets and paths, then compares
 // the library against git check-ignore. It is skipped under -short.
 func TestConformanceFuzz(t *testing.T) {
