@@ -40,19 +40,23 @@ type pattern struct {
 // AddPatterns/AddFromFile call). Do not call AddPatterns or AddFromFile
 // concurrently with Match.
 type Matcher struct {
-	patterns []pattern
-	errors   []PatternError
+	maxIgnoreFileSize int64
+	patterns          []pattern
+	errors            []PatternError
 }
 
-// PatternError records a pattern that could not be compiled.
+// PatternError records a pattern compilation error or a skipped oversized file.
 type PatternError struct {
 	Pattern string // the original pattern text
 	Source  string // file path, empty for programmatic patterns
-	Line    int    // 1-based line number
+	Line    int    // 1-based line number; zero for a file-size error
 	Message string
 }
 
 func (e PatternError) Error() string {
+	if e.Line == 0 && e.Source != "" {
+		return e.Source + ": " + e.Message
+	}
 	if e.Source != "" {
 		return e.Source + ":" + itoa(e.Line) + ": invalid pattern: " + e.Pattern + ": " + e.Message
 	}
@@ -73,9 +77,8 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
-// Errors returns any pattern compilation errors encountered while loading
-// patterns. Invalid patterns are silently skipped during matching; this
-// method lets callers detect and report them.
+// Errors returns pattern compilation errors and skipped oversized files.
+// File-size errors have a source path and a zero line number.
 func (m *Matcher) Errors() []PatternError {
 	return m.errors
 }
@@ -91,33 +94,39 @@ func (m *Matcher) Errors() []PatternError {
 // (containing .git/). If root is empty, no filesystem patterns are
 // loaded and the returned Matcher is empty. Use AddPatterns or
 // AddFromFile to add patterns programmatically.
-func New(root string) *Matcher {
+//
+// Options such as MaxIgnoreFileSize apply to files loaded here and to
+// later AddFromFile calls; oversized files are skipped and recorded in
+// Errors with Line set to zero.
+func New(root string, opts ...Option) *Matcher {
+	m, _ := newMatcher(root, opts)
+	return m
+}
+
+func newMatcher(root string, opts []Option) (*Matcher, error) {
 	m := &Matcher{}
+	for _, opt := range opts {
+		opt(m)
+	}
 
 	if root == "" {
-		return m
+		return m, nil
 	}
 
-	// Read global excludes (lowest priority)
-	if gef := globalExcludesFile(); gef != "" {
-		if data, err := os.ReadFile(gef); err == nil {
-			m.addPatterns(data, "", gef)
+	var firstErr error
+	for _, path := range []string{
+		globalExcludesFile(),
+		filepath.Join(root, ".git", "info", "exclude"),
+		filepath.Join(root, ".gitignore"),
+	} {
+		if path == "" {
+			continue
+		}
+		if err := m.addFromFile(path, ""); firstErr == nil {
+			firstErr = err
 		}
 	}
-
-	// Read .git/info/exclude
-	excludePath := filepath.Join(root, ".git", "info", "exclude")
-	if data, err := os.ReadFile(excludePath); err == nil {
-		m.addPatterns(data, "", excludePath)
-	}
-
-	// Read root .gitignore (highest priority)
-	ignorePath := filepath.Join(root, ".gitignore")
-	if data, err := os.ReadFile(ignorePath); err == nil {
-		m.addPatterns(data, "", ignorePath)
-	}
-
-	return m
+	return m, firstErr
 }
 
 // globalExcludesFile returns the path to the user's global gitignore file.
@@ -169,10 +178,11 @@ func expandTilde(path string) string {
 // NewFromDirectory creates a Matcher by walking the directory tree rooted
 // at root, loading every .gitignore file found along the way. Each nested
 // .gitignore is scoped to its containing directory. The .git directory is
-// skipped.
-func NewFromDirectory(root string) *Matcher {
-	m := New(root)
-	_ = walkRecursive(root, "", m, nil)
+// skipped. Oversized files under MaxIgnoreFileSize are skipped and recorded
+// in Errors.
+func NewFromDirectory(root string, opts ...Option) *Matcher {
+	m := New(root, opts...)
+	_ = walkRecursive(root, "", m, nil, false)
 	return m
 }
 
@@ -183,9 +193,15 @@ func NewFromDirectory(root string) *Matcher {
 //
 // Paths passed to fn are relative to root and use the OS path separator.
 // The root directory itself is not passed to fn.
-func Walk(root string, fn func(path string, d fs.DirEntry) error) error {
-	m := New(root)
-	return walkRecursive(root, "", m, fn)
+//
+// With MaxIgnoreFileSize set, an oversized ignore file stops the walk and
+// is returned as an *IgnoreFileSizeError.
+func Walk(root string, fn func(path string, d fs.DirEntry) error, opts ...Option) error {
+	m, err := newMatcher(root, opts)
+	if err != nil {
+		return err
+	}
+	return walkRecursive(root, "", m, fn, true)
 }
 
 // WalkFrom walks the directory tree starting at a subdirectory of root,
@@ -199,17 +215,23 @@ func Walk(root string, fn func(path string, d fs.DirEntry) error) error {
 // using either forward slashes or the OS path separator. Paths passed
 // to fn are relative to root (not to start) and use the OS path
 // separator. The start directory itself is passed to fn.
-func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) error {
+//
+// With MaxIgnoreFileSize set, an oversized ignore file stops the walk and
+// is returned as an *IgnoreFileSizeError.
+func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error, opts ...Option) error {
 	if start == "" || start == "." {
-		return Walk(root, fn)
+		return Walk(root, fn, opts...)
 	}
 
 	start = filepath.Clean(start)
 	if start == "." {
-		return Walk(root, fn)
+		return Walk(root, fn, opts...)
 	}
 
-	m := New(root)
+	m, err := newMatcher(root, opts)
+	if err != nil {
+		return err
+	}
 
 	// Load .gitignore from each ancestor directory between root and start
 	// (exclusive of start itself, which walkRecursive loads).
@@ -221,7 +243,9 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) err
 				break
 			}
 			prefix := slashed[:off+i]
-			m.AddFromFile(filepath.Join(root, prefix, ".gitignore"), prefix)
+			if err := m.addFromFile(filepath.Join(root, prefix, ".gitignore"), prefix); err != nil {
+				return err
+			}
 			off += i + 1
 		}
 	}
@@ -238,10 +262,10 @@ func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) err
 		}
 	}
 
-	return walkRecursive(root, start, m, fn)
+	return walkRecursive(root, start, m, fn, true)
 }
 
-func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) error) error {
+func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) error, stopOnSizeError bool) error {
 	dir := root
 	if rel != "" {
 		dir = filepath.Join(root, rel)
@@ -249,7 +273,9 @@ func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) er
 
 	// Load .gitignore for this directory before processing entries.
 	if rel != "" {
-		m.AddFromFile(filepath.Join(dir, ".gitignore"), filepath.ToSlash(rel))
+		if err := m.addFromFile(filepath.Join(dir, ".gitignore"), filepath.ToSlash(rel)); err != nil && stopOnSizeError {
+			return err
+		}
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -281,7 +307,7 @@ func walkRecursive(root, rel string, m *Matcher, fn func(string, fs.DirEntry) er
 		}
 
 		if entry.IsDir() {
-			if err := walkRecursive(root, entryRel, m, fn); err != nil {
+			if err := walkRecursive(root, entryRel, m, fn, stopOnSizeError); err != nil {
 				return err
 			}
 		}
@@ -297,13 +323,23 @@ func (m *Matcher) AddPatterns(data []byte, dir string) {
 }
 
 // AddFromFile reads a .gitignore file at the given absolute path and scopes
-// its patterns to the given relative directory.
+// its patterns to the given relative directory. It uses the matcher's file-size
+// limit, if set, and records oversized files in Errors without applying any rules.
 func (m *Matcher) AddFromFile(absPath, relDir string) {
-	data, err := os.ReadFile(absPath)
+	_ = m.addFromFile(absPath, relDir)
+}
+
+func (m *Matcher) addFromFile(absPath, relDir string) error {
+	data, err := readIgnoreFile(absPath, m.maxIgnoreFileSize)
 	if err != nil {
-		return
+		if sizeErr, ok := err.(*IgnoreFileSizeError); ok {
+			m.errors = append(m.errors, PatternError{Source: absPath, Message: sizeErr.message()})
+			return err
+		}
+		return nil
 	}
 	m.addPatterns(data, relDir, absPath)
+	return nil
 }
 
 // Match returns true if the given path should be ignored.
