@@ -1,7 +1,6 @@
 package gitignore
 
 import (
-	"bufio"
 	"bytes"
 	"io/fs"
 	"os"
@@ -432,11 +431,13 @@ func matchPattern(p *pattern, pathSegs []string, isDir bool) bool {
 }
 
 func (m *Matcher) addPatterns(data []byte, dir, source string) {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
 	lineNum := 0
-	for scanner.Scan() {
+	for len(data) > 0 {
+		var raw []byte
+		raw, data, _ = bytes.Cut(data, []byte{'\n'})
+		raw = bytes.TrimSuffix(raw, []byte{'\r'})
 		lineNum++
-		line := trimTrailingSpaces(scanner.Text())
+		line := trimTrailingSpaces(string(raw))
 		if line == "" || line[0] == '#' {
 			continue
 		}
