@@ -121,7 +121,7 @@ Run benchmarks on an otherwise idle machine, using the same Go toolchain for bot
 go test -run '^$' -bench . -benchmem -count=10 -cpu=1
 ```
 
-`BenchmarkCompile` includes filesystem reads and a Git subprocess through `New`; `BenchmarkAddPatterns` measures parsing without filesystem access. Compare samples with `benchstat` and check the timing spread before quoting speed changes.
+`BenchmarkCompile` and `BenchmarkWalkTree` include filesystem reads and a Git subprocess through `New`; `BenchmarkAddPatterns` measures parsing without filesystem access. Compare samples with `benchstat` and check the timing spread before quoting speed changes.
 
 ## License
 
