@@ -1,16 +1,19 @@
 package gitignore
 
 import (
-	"fmt"
 	"io"
 	"os"
+	"strconv"
 )
 
-// Options controls loading ignore files from disk.
-type Options struct {
-	// MaxIgnoreFileSize limits each file in bytes. Nonpositive values are unlimited.
-	// AddPatterns is unaffected because its data is already in memory.
-	MaxIgnoreFileSize int64
+// Option configures a Matcher at construction time.
+type Option func(*Matcher)
+
+// MaxIgnoreFileSize limits the bytes read from each ignore file. Nonpositive
+// values are unlimited. AddPatterns is unaffected because its data is already
+// in memory.
+func MaxIgnoreFileSize(n int64) Option {
+	return func(m *Matcher) { m.maxIgnoreFileSize = n }
 }
 
 // IgnoreFileSizeError reports an ignore file that exceeded its byte limit.
@@ -24,7 +27,7 @@ func (e *IgnoreFileSizeError) Error() string {
 }
 
 func (e *IgnoreFileSizeError) message() string {
-	return fmt.Sprintf("ignore file exceeds size limit of %d bytes", e.Limit)
+	return "ignore file exceeds size limit of " + strconv.FormatInt(e.Limit, 10) + " bytes"
 }
 
 func readIgnoreFile(path string, limit int64) ([]byte, error) {

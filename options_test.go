@@ -27,7 +27,7 @@ func TestIgnoreFileSizeBoundary(t *testing.T) {
 	path := filepath.Join(root, ".gitignore")
 	writeIgnoreFile(t, path, "*.log")
 	for _, limit := range []int64{-1, 0, 4, 5, 6, math.MaxInt64} {
-		m := gitignore.NewWithOptions(root, gitignore.Options{MaxIgnoreFileSize: limit})
+		m := gitignore.New(root, gitignore.MaxIgnoreFileSize(limit))
 		if got := m.Match("app.log"); got != (limit != 4) {
 			t.Errorf("limit %d: Match = %v", limit, got)
 		}
@@ -37,7 +37,7 @@ func TestIgnoreFileSizeBoundary(t *testing.T) {
 			t.Errorf("limit %d: Errors = %v", limit, m.Errors())
 		}
 	}
-	m := gitignore.NewWithOptions("", gitignore.Options{MaxIgnoreFileSize: 4})
+	m := gitignore.New("", gitignore.MaxIgnoreFileSize(4))
 	m.AddFromFile(path, "src")
 	checkSizeDiagnostic(t, m, path)
 	if m.Match("src/app.log") {
@@ -80,22 +80,22 @@ func checkSizeLimitedSource(t *testing.T, source string) {
 	path := filepath.Join(root, source)
 	writeIgnoreFile(t, path, "*.log\n")
 	writeIgnoreFile(t, filepath.Join(root, "src/deep/file.log"), "")
-	opts := gitignore.Options{MaxIgnoreFileSize: 5}
-	m := gitignore.NewFromDirectoryWithOptions(root, opts)
+	opt := gitignore.MaxIgnoreFileSize(5)
+	m := gitignore.NewFromDirectory(root, opt)
 	checkSizeDiagnostic(t, m, path)
 	if m.Match("src/deep/file.log") {
 		t.Fatal("skipped rules were applied")
 	}
 	for _, start := range []string{"", ".", "src", "src/deep"} {
-		err := gitignore.WalkFromWithOptions(root, start, opts, func(path string, _ os.DirEntry) error {
+		err := gitignore.WalkFrom(root, start, func(path string, _ os.DirEntry) error {
 			if filepath.ToSlash(path) == "src/deep/file.log" {
 				t.Error("walk continued past oversized ignore file")
 			}
 			return nil
-		})
-		checkSizeError(t, err, path, opts.MaxIgnoreFileSize)
+		}, opt)
+		checkSizeError(t, err, path, 5)
 	}
-	checkSizeError(t, gitignore.WalkWithOptions(root, opts, nil), path, opts.MaxIgnoreFileSize)
+	checkSizeError(t, gitignore.Walk(root, nil, opt), path, 5)
 	if err := gitignore.Walk(root, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestSizeLimitedDiscoveryContinues(t *testing.T) {
 	root := t.TempDir()
 	writeIgnoreFile(t, filepath.Join(root, "a/.gitignore"), "*.log\n")
 	writeIgnoreFile(t, filepath.Join(root, "b/.gitignore"), "*.go")
-	m := gitignore.NewFromDirectoryWithOptions(root, gitignore.Options{MaxIgnoreFileSize: 5})
+	m := gitignore.NewFromDirectory(root, gitignore.MaxIgnoreFileSize(5))
 	if !m.Match("b/main.go") {
 		t.Fatal("discovery stopped after oversized file")
 	}

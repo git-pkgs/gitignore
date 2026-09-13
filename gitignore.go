@@ -95,19 +95,20 @@ func (m *Matcher) Errors() []PatternError {
 // (containing .git/). If root is empty, no filesystem patterns are
 // loaded and the returned Matcher is empty. Use AddPatterns or
 // AddFromFile to add patterns programmatically.
-func New(root string) *Matcher {
-	return NewWithOptions(root, Options{})
-}
-
-// NewWithOptions loads the same files as New, using the supplied limits.
-// Oversized files are skipped and recorded in Errors with Line set to zero.
-func NewWithOptions(root string, options Options) *Matcher {
-	m, _ := newWithOptions(root, options)
+//
+// Options such as MaxIgnoreFileSize apply to files loaded here and to
+// later AddFromFile calls; oversized files are skipped and recorded in
+// Errors with Line set to zero.
+func New(root string, opts ...Option) *Matcher {
+	m, _ := newMatcher(root, opts)
 	return m
 }
 
-func newWithOptions(root string, options Options) (*Matcher, error) {
-	m := &Matcher{maxIgnoreFileSize: options.MaxIgnoreFileSize}
+func newMatcher(root string, opts []Option) (*Matcher, error) {
+	m := &Matcher{}
+	for _, opt := range opts {
+		opt(m)
+	}
 
 	if root == "" {
 		return m, nil
@@ -178,15 +179,10 @@ func expandTilde(path string) string {
 // NewFromDirectory creates a Matcher by walking the directory tree rooted
 // at root, loading every .gitignore file found along the way. Each nested
 // .gitignore is scoped to its containing directory. The .git directory is
-// skipped.
-func NewFromDirectory(root string) *Matcher {
-	return NewFromDirectoryWithOptions(root, Options{})
-}
-
-// NewFromDirectoryWithOptions loads nested ignore files using the supplied limits.
-// Oversized files are skipped and recorded in Errors.
-func NewFromDirectoryWithOptions(root string, options Options) *Matcher {
-	m := NewWithOptions(root, options)
+// skipped. Oversized files under MaxIgnoreFileSize are skipped and recorded
+// in Errors.
+func NewFromDirectory(root string, opts ...Option) *Matcher {
+	m := New(root, opts...)
 	_ = walkRecursive(root, "", m, nil, false)
 	return m
 }
@@ -198,14 +194,11 @@ func NewFromDirectoryWithOptions(root string, options Options) *Matcher {
 //
 // Paths passed to fn are relative to root and use the OS path separator.
 // The root directory itself is not passed to fn.
-func Walk(root string, fn func(path string, d fs.DirEntry) error) error {
-	return WalkWithOptions(root, Options{}, fn)
-}
-
-// WalkWithOptions walks like Walk using the supplied file limits.
-// An oversized ignore file stops the walk with an IgnoreFileSizeError.
-func WalkWithOptions(root string, options Options, fn func(path string, d fs.DirEntry) error) error {
-	m, err := newWithOptions(root, options)
+//
+// With MaxIgnoreFileSize set, an oversized ignore file stops the walk and
+// is returned as an *IgnoreFileSizeError.
+func Walk(root string, fn func(path string, d fs.DirEntry) error, opts ...Option) error {
+	m, err := newMatcher(root, opts)
 	if err != nil {
 		return err
 	}
@@ -223,23 +216,20 @@ func WalkWithOptions(root string, options Options, fn func(path string, d fs.Dir
 // using either forward slashes or the OS path separator. Paths passed
 // to fn are relative to root (not to start) and use the OS path
 // separator. The start directory itself is passed to fn.
-func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error) error {
-	return WalkFromWithOptions(root, start, Options{}, fn)
-}
-
-// WalkFromWithOptions walks like WalkFrom using the supplied file limits.
-// An oversized ignore file stops the walk with an IgnoreFileSizeError.
-func WalkFromWithOptions(root, start string, options Options, fn func(path string, d fs.DirEntry) error) error {
+//
+// With MaxIgnoreFileSize set, an oversized ignore file stops the walk and
+// is returned as an *IgnoreFileSizeError.
+func WalkFrom(root, start string, fn func(path string, d fs.DirEntry) error, opts ...Option) error {
 	if start == "" || start == "." {
-		return WalkWithOptions(root, options, fn)
+		return Walk(root, fn, opts...)
 	}
 
 	start = filepath.Clean(start)
 	if start == "." {
-		return WalkWithOptions(root, options, fn)
+		return Walk(root, fn, opts...)
 	}
 
-	m, err := newWithOptions(root, options)
+	m, err := newMatcher(root, opts)
 	if err != nil {
 		return err
 	}
