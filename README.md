@@ -13,6 +13,14 @@ A Go library for matching paths against gitignore rules. Pattern matching uses a
 - Invalid pattern surfacing via `Errors()`
 - Fast rejection for literal names and suffix patterns like `*.log`
 
+## Installation
+
+```sh
+go get github.com/git-pkgs/gitignore
+```
+
+## Usage
+
 ```go
 import "github.com/git-pkgs/gitignore"
 ```
@@ -125,4 +133,4 @@ go test -run '^$' -bench . -benchmem -count=10 -cpu=1
 
 ## License
 
-MIT
+[MIT](LICENSE).
