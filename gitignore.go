@@ -350,6 +350,12 @@ func (m *Matcher) AddPatterns(data []byte, dir string) {
 	m.addPatterns(data, dir, "")
 }
 
+// AddPatternsWithSource parses gitignore pattern lines from data, scopes them
+// to the given relative directory, and retains source as match provenance.
+func (m *Matcher) AddPatternsWithSource(data []byte, dir, source string) {
+	m.addPatterns(data, dir, source)
+}
+
 // AddFromFile reads a .gitignore file at the given absolute path and scopes
 // its patterns to the given relative directory. It uses the matcher's file-size
 // limit, if set, and records oversized files in Errors without applying any rules.

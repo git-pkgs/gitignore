@@ -2548,6 +2548,21 @@ func TestAddPatterns(t *testing.T) {
 	}
 }
 
+func TestAddPatternsWithSource(t *testing.T) {
+	m := gitignore.New("")
+	m.AddPatternsWithSource([]byte("*.env\n[[:bogus:]]\n"), "services/api", "services/api/.gitignore")
+
+	result := m.MatchDetail("services/api/local.env")
+	if !result.Ignored || result.Pattern != "*.env" || result.Line != 1 ||
+		result.Source != "services/api/.gitignore" {
+		t.Fatalf("MatchDetail = %#v", result)
+	}
+	errors := m.Errors()
+	if len(errors) != 1 || errors[0].Source != "services/api/.gitignore" || errors[0].Line != 2 {
+		t.Fatalf("Errors = %#v", errors)
+	}
+}
+
 func TestNewEmptyRootSkipsFilesystem(t *testing.T) {
 	// Create a temporary directory with a .gitignore that excludes *.exe
 	dir := t.TempDir()
