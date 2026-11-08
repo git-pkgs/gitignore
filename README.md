@@ -55,6 +55,13 @@ m.AddFromFile("/path/to/repo/src/.gitignore", "src")
 m.AddPatterns([]byte("*.log\nbuild/\n"), "")
 ```
 
+When pattern bytes came from another filesystem, use `AddPatternsWithSource`
+to preserve the source label returned by `MatchDetail` and `Errors`:
+
+```go
+m.AddPatternsWithSource(data, "src", "src/.gitignore")
+```
+
 To limit the bytes read from each ignore file, pass `MaxIgnoreFileSize` to any constructor or walk function:
 
 ```go
