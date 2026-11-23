@@ -1,0 +1,5 @@
+debug.log
+sub/debug.log
+build/
+build/out
+keep.txt

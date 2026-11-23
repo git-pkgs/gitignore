@@ -1505,6 +1505,41 @@ func TestMatchBlankLines(t *testing.T) {
 	}
 }
 
+func TestMatchUTF8BOMSkipped(t *testing.T) {
+	// git skips a UTF-8 byte order mark at the start of an ignore file
+	// (skip_utf8_bom in dir.c), so the first line is read as written.
+	const bom = "\xef\xbb\xbf"
+
+	tests := []struct {
+		name     string
+		patterns string
+		path     string
+		want     bool
+	}{
+		{"first pattern", bom + "*.log\n", "debug.log", true},
+		{"first line is a comment", bom + "# comment\n", bom + "# comment", false},
+		{"pattern after a comment", bom + "# comment\nfoo\n", "foo", true},
+		{"only at the start of the file", "foo\n" + bom + "bar\n", "bar", false},
+		{"kept on a later line", "foo\n" + bom + "bar\n", bom + "bar", true},
+		{"only one is skipped", bom + bom + "bar\n", "bar", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := setupMatcher(t, tt.patterns)
+			if got := m.Match(tt.path); got != tt.want {
+				t.Errorf("file: patterns %q, Match(%q) = %v, want %v", tt.patterns, tt.path, got, tt.want)
+			}
+
+			m = gitignore.New("")
+			m.AddPatterns([]byte(tt.patterns), "")
+			if got := m.Match(tt.path); got != tt.want {
+				t.Errorf("AddPatterns: patterns %q, Match(%q) = %v, want %v", tt.patterns, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 // Verify edge cases against git check-ignore
 func TestMatchEdgeCasesVsGitCheckIgnore(t *testing.T) {
 	tests := []struct {
