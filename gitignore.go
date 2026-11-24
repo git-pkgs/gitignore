@@ -541,6 +541,9 @@ func (m *Matcher) addPatterns(data []byte, dir, source string) {
 	if dir != "" {
 		prefix = strings.Split(dir, "/")
 	}
+	// git skips a UTF-8 byte order mark at the start of an ignore file
+	// (skip_utf8_bom in dir.c), so it doesn't become part of the first line.
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 	lineNum := 0
 	for len(data) > 0 {
 		var raw []byte
